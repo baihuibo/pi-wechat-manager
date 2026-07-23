@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@e
 import { Type } from '@sinclair/typebox';
 import { createConnection, Socket } from 'node:net';
 import { existsSync, readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -558,7 +559,6 @@ function resolveNodeBinary(): string {
   if (existsSync(process.execPath)) return process.execPath;
   
   // 2. 尝试 PATH 中的 node
-  const { execSync } = await import('node:child_process');
   try {
     const nodePath = execSync('which node 2>/dev/null', { encoding: 'utf-8' }).trim();
     if (nodePath && existsSync(nodePath)) return nodePath;
