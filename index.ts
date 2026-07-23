@@ -562,8 +562,8 @@ async function startDaemon(): Promise<boolean> {
   
   const logFd = openSync(logFile, 'a');
   const tsxLoader = require.resolve('tsx');
-  // Use 'node' directly - inherits PATH from parent process
-  const child = spawn('node', ['--import', tsxLoader, daemonScript], {
+  // Use process.execPath - always points to the actual running node binary
+  const child = spawn(process.execPath, ['--import', tsxLoader, daemonScript], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     cwd: join(homedir(), '.pi', 'agent', 'extensions', 'pi-wechat-manager'),
