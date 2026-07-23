@@ -485,7 +485,7 @@ export class WechatBridge {
         if (args) {
           // 通过别名或 ID 查找
           const aliases = await this.getAliases();
-          targetSessionId = aliases[args] || this.findSessionById(args);
+          targetSessionId = aliases[args] || await this.findSessionById(args);
         }
         
         if (!targetSessionId) {
@@ -511,7 +511,7 @@ export class WechatBridge {
         if (args) {
           // 通过别名或 ID 查找
           const aliases = await this.getAliases();
-          targetSessionId = aliases[args] || this.findSessionById(args);
+          targetSessionId = aliases[args] || await this.findSessionById(args);
         }
         
         if (!targetSessionId) {
@@ -538,7 +538,7 @@ export class WechatBridge {
         if (args) {
           // 通过别名或 ID 查找
           const aliases = await this.getAliases();
-          targetSessionId = aliases[args] || this.findSessionById(args);
+          targetSessionId = aliases[args] || await this.findSessionById(args);
         }
         
         if (!targetSessionId) {
@@ -585,7 +585,7 @@ export class WechatBridge {
         if (args) {
           // 通过别名或 ID 查找
           const aliases = await this.getAliases();
-          targetSessionId = aliases[args] || this.findSessionById(args);
+          targetSessionId = aliases[args] || await this.findSessionById(args);
         }
         
         if (!targetSessionId) {
