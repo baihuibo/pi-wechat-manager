@@ -710,7 +710,7 @@ export class WechatBridge {
   }
   
   // 根据 ID 或短 ID 查找 session
-  private findSessionById(id: string): string | null {
+  private async findSessionById(id: string): Promise<string | null> {
     // 1. 检查是否是完整的 session ID
     if (this.state.connections.has(id)) {
       return id;
