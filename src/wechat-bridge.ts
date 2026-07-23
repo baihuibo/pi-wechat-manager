@@ -430,7 +430,7 @@ export class WechatBridge {
         
         // 使用 --name 参数设置 session 名称，pi 会自动创建 session
         const sessionName = aliasName || `wechat-${Date.now()}`;
-        const scriptContent = `#!/bin/bash\nexport PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\ncd "${projectPath}"\npi --name "${sessionName}"\n`;
+        const scriptContent = `#!/bin/bash\ncd "${projectPath}"\npi --name "${sessionName}"\n`;
         writeFileSync(scriptPath, scriptContent, 'utf-8');
         chmodSync(scriptPath, '755');
         
@@ -842,7 +842,7 @@ export class WechatBridge {
       const { writeFileSync, chmodSync } = await import('node:fs');
       const { join } = await import('node:path');
       const scriptPath = join(cwd, '.pi-start.sh');
-      const scriptContent = `#!/bin/bash\nexport PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\ncd "${cwd}"\npi --session-id "${sessionId}"\n`;
+      const scriptContent = `#!/bin/bash\ncd "${cwd}"\npi --session-id "${sessionId}"\n`;
       writeFileSync(scriptPath, scriptContent, 'utf-8');
       chmodSync(scriptPath, '755');
       
