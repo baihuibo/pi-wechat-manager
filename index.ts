@@ -6,7 +6,17 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@e
 import { Type } from '@sinclair/typebox';
 import { createConnection, Socket } from 'node:net';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Extension 安装目录（兼容 pi install 和手动安装）
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const EXTENSION_DIR = __dirname;
+
+// Socket / PID / 日志等运行时数据目录
+const MANAGER_DIR = join(homedir(), '.pi', 'agent', 'pi-wechat-manager');
+const SOCKET_PATH = join(MANAGER_DIR, 'daemon.sock');
+const PID_FILE = join(MANAGER_DIR, 'daemon.pid');
 import { homedir } from 'node:os';
 import qrcode from 'qrcode-terminal';
 import { getQrCode, pollQrStatus } from './src/wechat-auth.js';
@@ -44,9 +54,6 @@ function extractUrl(text: string): string | null {
   const urlMatch = text.match(/https?:\/\/[^\s]+/);
   return urlMatch ? urlMatch[0] : null;
 }
-
-const SOCKET_PATH = join(homedir(), '.pi', 'agent', 'pi-wechat-manager', 'daemon.sock');
-const PID_FILE = join(homedir(), '.pi', 'agent', 'pi-wechat-manager', 'daemon.pid');
 
 type Ctx = ExtensionContext | ExtensionCommandContext;
 
@@ -576,9 +583,9 @@ async function startDaemon(): Promise<boolean> {
   const { spawn } = await import('node:child_process');
   const { mkdirSync, openSync } = await import('node:fs');
   
-  const daemonScript = join(homedir(), '.pi', 'agent', 'extensions', 'pi-wechat-manager', 'src', 'daemon.ts');
-  const logFile = join(homedir(), '.pi', 'agent', 'pi-wechat-manager', 'daemon.log');
-  const logDir = join(homedir(), '.pi', 'agent', 'pi-wechat-manager');
+  const daemonScript = join(EXTENSION_DIR, 'src', 'daemon.ts');
+  const logFile = join(MANAGER_DIR, 'daemon.log');
+  const logDir = MANAGER_DIR;
   
   if (!existsSync(logDir)) {
     mkdirSync(logDir, { recursive: true });
@@ -590,7 +597,7 @@ async function startDaemon(): Promise<boolean> {
   const child = spawn(nodeBin, ['--import', tsxLoader, daemonScript], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    cwd: join(homedir(), '.pi', 'agent', 'extensions', 'pi-wechat-manager'),
+    cwd: EXTENSION_DIR,
     env: { ...process.env, NODE_NO_WARNINGS: '1' },
   });
   
