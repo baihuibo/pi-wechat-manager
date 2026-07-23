@@ -546,6 +546,30 @@ async function startLoginFlow(ctx: ExtensionCommandContext): Promise<boolean> {
 // 启动守护进程
 // ============================================================================
 
+function resolveNodeBinary(): string {
+  // 1. 尝试当前进程的 node（最可靠）
+  if (existsSync(process.execPath)) return process.execPath;
+  
+  // 2. 尝试 PATH 中的 node
+  const { execSync } = require('node:child_process');
+  try {
+    const nodePath = execSync('which node 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (nodePath && existsSync(nodePath)) return nodePath;
+  } catch {}
+  
+  // 3. 尝试常见路径
+  const candidates = [
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+    '/usr/bin/node',
+  ];
+  for (const path of candidates) {
+    if (existsSync(path)) return path;
+  }
+  
+  throw new Error('找不到可用的 Node.js，请安装 Node.js ≥ 18');
+}
+
 async function startDaemon(): Promise<boolean> {
   if (isDaemonRunning()) return true;
   
@@ -562,8 +586,8 @@ async function startDaemon(): Promise<boolean> {
   
   const logFd = openSync(logFile, 'a');
   const tsxLoader = require.resolve('tsx');
-  // Use process.execPath - always points to the actual running node binary
-  const child = spawn(process.execPath, ['--import', tsxLoader, daemonScript], {
+  const nodeBin = resolveNodeBinary();
+  const child = spawn(nodeBin, ['--import', tsxLoader, daemonScript], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     cwd: join(homedir(), '.pi', 'agent', 'extensions', 'pi-wechat-manager'),
