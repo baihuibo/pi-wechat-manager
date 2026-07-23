@@ -441,7 +441,7 @@ export class WechatBridge {
         this.state.pendingNewSession = true;
         
         // 启动终端 + pi
-        const child = this.spawnTerminal(scriptPath);
+        const child = await this.spawnTerminal(scriptPath);
         child.unref();
         
         // 延迟后发送消息给 pi（让 pi 创建 session）
@@ -724,7 +724,7 @@ export class WechatBridge {
     }
     
     // 3. 通过 name 查找
-    const { listSessions } = require('./session-discover.js');
+    const { listSessions } = await import('./session-discover.js');
     const sessions = listSessions();
     const session = sessions.find((s: any) => s.name && s.name.toLowerCase().includes(id.toLowerCase()));
     return session ? session.id : null;
@@ -812,12 +812,11 @@ export class WechatBridge {
   
   // 发送欢迎消息
   // 打开终端窗口（优先 Ghostty，回退 Terminal.app）
-  private spawnTerminal(scriptPath: string) {
-    const { spawn } = require('node:child_process');
+  private async spawnTerminal(scriptPath: string) {
+    const { spawn, execSync } = await import('node:child_process');
     
     // 检测 Ghostty
     try {
-      const { execSync } = require('node:child_process');
       execSync('ls /Applications/Ghostty.app > /dev/null 2>&1');
       return spawn('open', ['-na', 'Ghostty.app', '--args', '-e', scriptPath], { detached: true, stdio: 'ignore' });
     } catch {}

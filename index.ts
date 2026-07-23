@@ -558,7 +558,7 @@ function resolveNodeBinary(): string {
   if (existsSync(process.execPath)) return process.execPath;
   
   // 2. 尝试 PATH 中的 node
-  const { execSync } = require('node:child_process');
+  const { execSync } = await import('node:child_process');
   try {
     const nodePath = execSync('which node 2>/dev/null', { encoding: 'utf-8' }).trim();
     if (nodePath && existsSync(nodePath)) return nodePath;

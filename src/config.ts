@@ -1,8 +1,6 @@
 // ============================================================================
-// 配置管理
-// ============================================================================
-
-import { join } from 'node:path';
+import { join } from "node:path";
+import { unlinkSync } from "node:fs";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 
@@ -91,7 +89,6 @@ export function saveCredentials(credentials: any) {
 export function clearCredentials() {
   if (existsSync(CREDENTIALS_FILE)) {
     try {
-      const { unlinkSync } = require('node:fs');
       unlinkSync(CREDENTIALS_FILE);
     } catch {}
   }
