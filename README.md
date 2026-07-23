@@ -13,11 +13,7 @@
 ### 安装
 
 ```bash
-# npm 安装到 pi 全局扩展
-npm install -g pi-wechat-manager
-
-# 或手动克隆
-git clone https://github.com/baihuibo/pi-wechat-manager ~/.pi/agent/extensions/pi-wechat-manager
+pi install npm:pi-wechat-manager
 ```
 
 ### 启动
