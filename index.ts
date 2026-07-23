@@ -561,10 +561,9 @@ async function startDaemon(): Promise<boolean> {
   }
   
   const logFd = openSync(logFile, 'a');
-  // Use require.resolve to find tsx (works regardless of install location)
   const tsxLoader = require.resolve('tsx');
-  
-  const child = spawn(process.execPath, ['--import', tsxLoader, daemonScript], {
+  // Use 'node' directly - inherits PATH from parent process
+  const child = spawn('node', ['--import', tsxLoader, daemonScript], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     cwd: join(homedir(), '.pi', 'agent', 'extensions', 'pi-wechat-manager'),
