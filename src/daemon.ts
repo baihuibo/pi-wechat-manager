@@ -58,15 +58,23 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       // 如果是新连接的 pi，且是通过 /new 命令启动的
       if (isNew && state.pendingNewSession) {
         state.defaultSessionId = sessionId;
-        state.pendingNewSession = false;
         console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
         
-        // 将 pending 消息路由到新 session
-        const pending = state.dequeueMessages('__pending__');
-        if (pending.length > 0) {
-          for (const msg of pending) {
+        // 取第一个待投递的消息批次（FIFO）
+        const pendingEntries = Array.from(state.pendingNewMessages.entries());
+        if (pendingEntries.length > 0) {
+          const [key, messages] = pendingEntries[0];
+          state.pendingNewMessages.delete(key);
+          console.log(`[状态] 投递 ${messages.length} 条消息给 ${sessionId.slice(0,8)}（绑定名: ${key}）`);
+          
+          for (const msg of messages) {
             state.enqueueMessage(sessionId, { ...msg, sessionId });
           }
+        }
+        
+        // 没有更多待投递消息时清除标记
+        if (state.pendingNewMessages.size === 0) {
+          state.pendingNewSession = false;
         }
       }
       

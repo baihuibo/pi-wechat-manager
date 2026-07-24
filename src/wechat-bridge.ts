@@ -437,8 +437,12 @@ export class WechatBridge {
         console.log(`[微信] 启动脚本: ${scriptPath}`);
         console.log(`[微信] 脚本内容:\n${scriptContent}`);
         
-        // 消息先入队，再标记 pending（防止新 pi 抢先连接导致消息丢失）
-        this.state.enqueueMessage('__pending__', {
+        // 消息入队，key 为 sessionName（确保发给正确的 pi）
+        const pendingKey = sessionName;
+        if (!this.state.pendingNewMessages.has(pendingKey)) {
+          this.state.pendingNewMessages.set(pendingKey, []);
+        }
+        this.state.pendingNewMessages.get(pendingKey)!.push({
           id: `msg_${Date.now()}`,
           sessionId: '__pending__',
           userId: userId,

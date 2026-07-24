@@ -73,6 +73,9 @@ export class DaemonState {
   // 标记是否有新 session 即将创建（通过 /new 命令）
   pendingNewSession: boolean = false;
   
+  // /new 命令的待投递消息，key=sessionName，value=队列消息（FIFO）
+  pendingNewMessages: Map<string, QueuedMessage[]> = new Map();
+  
   // 定时任务列表
   cronTasks: Map<string, CronTask> = new Map();
   
