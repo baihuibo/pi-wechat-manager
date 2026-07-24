@@ -16,6 +16,7 @@ export const ALIASES_FILE = join(MANAGER_DIR, 'aliases.json');
 export const QUEUE_DIR = join(MANAGER_DIR, 'queue');
 export const MEDIA_DIR = join(MANAGER_DIR, 'media');
 export const PLIST_PATH = join(HOME, 'Library', 'LaunchAgents', 'com.pi.wechat-manager.plist');
+export const SESSION_REGISTRY_FILE = join(MANAGER_DIR, 'session-registry.json');
 export const HTTP_PORT = 19087;
 
 // 配置接口
@@ -108,4 +109,21 @@ export function loadAliases(): Record<string, string> {
 export function saveAliases(aliases: Record<string, string>) {
   ensureDirectories();
   writeFileSync(ALIASES_FILE, JSON.stringify(aliases, null, 2));
+}
+
+// 加载 Session 注册表（sessionId 列表，持久化，永久有效）
+export function loadSessionRegistry(): Set<string> {
+  if (existsSync(SESSION_REGISTRY_FILE)) {
+    try {
+      const data = JSON.parse(readFileSync(SESSION_REGISTRY_FILE, 'utf-8'));
+      return new Set(Array.isArray(data) ? data : []);
+    } catch {}
+  }
+  return new Set();
+}
+
+// 保存 Session 注册表
+export function saveSessionRegistry(registry: Set<string>) {
+  ensureDirectories();
+  writeFileSync(SESSION_REGISTRY_FILE, JSON.stringify([...registry], null, 2));
 }

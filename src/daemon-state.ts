@@ -76,11 +76,11 @@ export class DaemonState {
   // /new 命令的待投递消息，key=sessionName，value=队列消息（FIFO）
   pendingNewMessages: Map<string, QueuedMessage[]> = new Map();
   
-  // 最近断开连接的 session（用于区分重连和新连接），value=断开时间戳
-  recentlyDisconnected: Map<string, number> = new Map();
-  
   // /new 超时定时器: key=sessionName, value=timeout handle
   pendingNewTimers: Map<string, NodeJS.Timeout> = new Map();
+  
+  // Session 注册表：见过一次的 sessionId 永久标记（持久化到 JSON）
+  sessionRegistry: Set<string> = new Set();
   
   // 定时任务列表
   cronTasks: Map<string, CronTask> = new Map();
@@ -97,6 +97,9 @@ export class DaemonState {
       progressMessages: [],
     });
     
+    // 加入永久注册表（之后重连不视为新 pi）
+    this.sessionRegistry.add(sessionId);
+    
     // 如果没有默认 session，设为第一个连接的
     if (!this.defaultSessionId) {
       this.defaultSessionId = sessionId;
@@ -105,10 +108,9 @@ export class DaemonState {
     console.log(`[状态] 注册 session: ${sessionId} (PID: ${pid})`);
   }
   
-  // 注销连接
+  // 注销连接（不删注册表，sessionId 永久标记为「见过」）
   unregister(sessionId: string): void {
     this.connections.delete(sessionId);
-    this.recentlyDisconnected.set(sessionId, Date.now());
     console.log(`[状态] 注销 session: ${sessionId}`);
     
     if (this.defaultSessionId === sessionId) {
@@ -405,12 +407,6 @@ export class DaemonState {
     for (const id of stale) {
       console.log(`[状态] Session ${id} 心跳超时，断开连接`);
       this.unregister(id);
-    }
-    
-    // 清理 recentlyDisconnected 中超过 60s 的条目
-    const cutoff = now - 60_000;
-    for (const [id, timestamp] of this.recentlyDisconnected) {
-      if (timestamp < cutoff) this.recentlyDisconnected.delete(id);
     }
     
     return stale;

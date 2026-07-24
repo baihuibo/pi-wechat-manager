@@ -17,6 +17,7 @@ import {
   saveCredentials,
   loadAliases,
   saveAliases,
+  loadSessionRegistry,
 } from './config.js';
 import { listSessions, getLatestSession } from './session-discover.js';
 import { WechatBridge } from './wechat-bridge.js';
@@ -52,19 +53,16 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
   switch (method) {
     case 'register': {
       const { sessionId, pid, cwd } = params;
-      const isNew = !state.connections.has(sessionId);
-      const isReconnect = state.recentlyDisconnected.has(sessionId);
-      
-      // 重连的 session 不算'新'
-      if (isReconnect) {
-        state.recentlyDisconnected.delete(sessionId);
-        console.log(`[状态] Session ${sessionId.slice(0,8)} 重连`);
-      }
+      const isNew = !state.sessionRegistry.has(sessionId);
       
       state.register(sessionId, pid, cwd, socket);
       
-      // 只有真正新连接且不是重连的，才路由 pending 消息
-      if (isNew && !isReconnect && state.pendingNewSession) {
+      // 保存注册表到磁盘
+      const { saveSessionRegistry } = await import('./config.js');
+      saveSessionRegistry(state.sessionRegistry);
+      
+      // 只有注册表里没有的 sessionId 才视为新 pi
+      if (isNew && state.pendingNewSession) {
         state.defaultSessionId = sessionId;
         console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
         
@@ -672,6 +670,10 @@ async function start(): Promise<void> {
   
   ensureDirectories();
   writePidFile();
+  
+  // 加载持久化的 session 注册表
+  state.sessionRegistry = loadSessionRegistry();
+  console.log(`[注册表] 已加载 ${state.sessionRegistry.size} 个已知 session`);
   
   // 启动服务器
   startSocketServer();
