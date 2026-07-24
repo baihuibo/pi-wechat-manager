@@ -76,8 +76,8 @@ export class DaemonState {
   // /new 命令的待投递消息，key=sessionName，value=队列消息（FIFO）
   pendingNewMessages: Map<string, QueuedMessage[]> = new Map();
   
-  // 最近断开连接的 session（用于区分重连和新连接）
-  recentlyDisconnected: Set<string> = new Set();
+  // 最近断开连接的 session（用于区分重连和新连接），value=断开时间戳
+  recentlyDisconnected: Map<string, number> = new Map();
   
   // /new 超时定时器: key=sessionName, value=timeout handle
   pendingNewTimers: Map<string, NodeJS.Timeout> = new Map();
@@ -108,7 +108,7 @@ export class DaemonState {
   // 注销连接
   unregister(sessionId: string): void {
     this.connections.delete(sessionId);
-    this.recentlyDisconnected.add(sessionId);
+    this.recentlyDisconnected.set(sessionId, Date.now());
     console.log(`[状态] 注销 session: ${sessionId}`);
     
     if (this.defaultSessionId === sessionId) {
@@ -407,8 +407,11 @@ export class DaemonState {
       this.unregister(id);
     }
     
-    // 定期清理 recentlyDisconnected（保留 60s）
-    this.recentlyDisconnected.clear();
+    // 清理 recentlyDisconnected 中超过 60s 的条目
+    const cutoff = now - 60_000;
+    for (const [id, timestamp] of this.recentlyDisconnected) {
+      if (timestamp < cutoff) this.recentlyDisconnected.delete(id);
+    }
     
     return stale;
   }
