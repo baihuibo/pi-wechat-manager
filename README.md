@@ -173,11 +173,15 @@ playwright install chromium
 ## 更新
 
 ```bash
-cd ~/.pi/agent/git/github.com/baihuibo/pi-wechat-manager
-git pull
-```
+# 1. pi 中停止守护进程
+/wechat stop
 
-然后在 pi 中 `/reload`。
+# 2. pi 中更新
+pi update git:github.com/baihuibo/pi-wechat-manager@main
+
+# 3. 重新启动
+/wechat start
+```
 
 ---
 
