@@ -449,29 +449,15 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       }
       
       case 'compact': {
-        // 直接调用 ctx.compact()，不走 LLM
         if (ctx) {
-          try {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: '♻️ 正在压缩上下文...' 
-              });
-            }
-            await ctx.compact();
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: '✅ 上下文压缩完成' 
-              });
-            }
-          } catch (e: any) {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `❌ 压缩失败: ${e.message}` 
-              });
-            }
+          // 触发压缩（不等待，并行执行）
+          ctx.compact().catch(() => {});
+          // 立即通知用户
+          if (socketClient) {
+            await socketClient.request('send_to_wechat', {
+              userId,
+              text: '♻️ 已触发压缩，完成后会通知',
+            });
           }
         }
         break;
