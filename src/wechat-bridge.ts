@@ -300,7 +300,7 @@ export class WechatBridge {
 ` +
         `/alias [名字] → 给当前 pi 起名
 ` +
-        `/alias [名字] [唯一标识] → 给指定 pi 起名
+        `/alias [名字] → 给当前 pi 起名
 
 ` +
         `**⏰ 定时**
@@ -400,42 +400,25 @@ export class WechatBridge {
       }
       
       case 'alias': {
-        const [name, targetSession] = args.split(/\s+/);
+        const name = args?.trim();
         if (!name) {
-          // 列出别名（从 session 文件中读取）
-          const { listSessions } = await import('./session-discover.js');
-          const sessions = listSessions();
+          // /alias → 列出所有别名
           const aliases = await this.getAliases();
-          
           if (Object.keys(aliases).length === 0) {
-            await this.sendText(userId, 'ℹ️ **没有设置别名**\n\n使用 /alias <名称> 设置别名');
+            await this.sendText(userId, 'ℹ️ **没有设置别名**\n\n使用 /alias [名字] 给当前 pi 起名');
           } else {
-            const aliasList = Object.entries(aliases).map(([k, v]) => `- @${k}`).join('\n');
+            const aliasList = Object.entries(aliases).map(([k, v]) => `- @${k} → ${v.slice(0, 8)}...`).join('\n');
             await this.sendText(userId, `**📋 别名列表：**\n\n${aliasList}`);
           }
-        } else if (!targetSession) {
-          // 设置当前 session 别名
+        } else {
+          // /alias 名字 → 给当前 session 起名
           const currentSession = this.state.defaultSessionId;
           if (!currentSession) {
             await this.sendText(userId, '❌ 没有当前 session，请先启动 pi');
           } else {
             await this.setAlias(name, currentSession);
-            await this.sendText(userId, `✅ 已设置别名：\n- @${name} → ${currentSession.slice(0, 8)}...`);
+            await this.sendText(userId, `✅ 已设置别名：@${name} → ${currentSession.slice(0, 8)}...`);
           }
-        } else {
-          // 设置指定 session 别名（支持短 ID 匹配）
-          const { listSessions } = await import('./session-discover.js');
-          const sessions = listSessions();
-          const matchedSession = sessions.find(s => s.id.startsWith(targetSession));
-          
-          if (!matchedSession) {
-            await this.sendText(userId, `❌ 未找到 session: ${targetSession}`);
-            break;
-          }
-          
-          // 存储完整的 session ID
-          await this.setAlias(name, matchedSession.id);
-          await this.sendText(userId, `✅ 已设置别名：\n- @${name} → ${matchedSession.id.slice(0, 8)}...`);
         }
         break;
       }
