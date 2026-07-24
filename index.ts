@@ -450,15 +450,16 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       
       case 'compact': {
         if (ctx && socketClient) {
+          const sc = socketClient;
           // 通知开始
-          await socketClient.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
+          await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
           // 并行执行，完成/失败后通知
           ctx.compact()
             .then(() => {
-              socketClient?.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
+              sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
             })
             .catch((e: any) => {
-              socketClient?.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
+              sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
             });
         }
         break;
