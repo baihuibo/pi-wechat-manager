@@ -427,22 +427,34 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       }
       
       case 'stop': {
-        if (globalPi) {
-          // 紧急命令，使用 steer 立即执行
-          globalPi.sendUserMessage('/stop', { deliverAs: 'steer' });
+        // 中断当前 agent
+        if (ctx) {
+          if (!ctx.isIdle()) {
+            ctx.abort();
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { userId, text: '⏹️ 已中断' });
+            }
+          } else {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { userId, text: '⏹️ 当前无运行任务' });
+            }
+          }
         }
         break;
       }
       
       case 'reset': {
-        // 清空上下文
-        if (globalPi) {
-          globalPi.sendUserMessage('/compact', { deliverAs: 'steer' });
-        }
-        if (socketClient) {
-          await socketClient.request('send_to_wechat', { 
-            userId, 
-            text: '♻️ 已触发上下文压缩' 
+        // 压缩上下文（等同 /compact）
+        if (ctx && socketClient) {
+          const sc = socketClient;
+          await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
+          ctx.compact({
+            onComplete: () => {
+              sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
+            },
+            onError: (e: any) => {
+              sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
+            },
           });
         }
         break;
