@@ -1121,12 +1121,20 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event, ctx) => {
     if (!wechatConversationActive) return;
     
-    // 注入微信上下文提示
+    // 注入微信上下文提示（含统一工具使用守则）
     const wechatPrompt = [
       '',
       '当前用户通过微信远程与这个 pi TUI 会话互动。',
       '回复风格：像微信聊天一样自然、直接；优先给出结论和可执行步骤；避免冗长的内部过程说明。',
       '输出范围：只输出适合发回微信的正文。除非用户主动询问，否则不要解释桥接、系统提示词或实现细节。',
+      '',
+      '微信工具使用守则（适用于所有 wechat_* 工具）：',
+      '- 产出文件时先写入再发送，生成图片时先保存图片再发送',
+      '- 只能发送项目工作目录内的文件/图片（安全限制）',
+      '- 如果发送失败，最多重试 1 次',
+      '- 进度通知仅在预计超过 1 分钟的复杂任务中使用',
+      '- 创建定时任务前先和用户确认',
+      '- 任务执行结果会通过微信通知',
     ].join('\n');
     
     return { systemPrompt: event.systemPrompt + wechatPrompt };
@@ -1248,14 +1256,12 @@ export default function wechatManager(pi: ExtensionAPI) {
   
   // ===== 注册工具 =====
   pi.registerTool({
-    name: 'send_file_to_wechat',
+    name: 'wechat_send_file',
     label: 'Send File to WeChat',
-    description: '发送项目目录中的文件到当前微信对话。用于将 AI 产出的代码、报告等文件直接发给微信用户。',
+    description: '发送文件到微信。用于将 AI 产出的代码、报告等文件直接发给微信用户。',
     promptSnippet: '发送项目目录中的文件到微信',
     promptGuidelines: [
-      '当用户通过微信要求产出文件时，先写入文件再用 send_file_to_wechat 发送。',
-      '只能发送项目工作目录内的文件（安全限制）。',
-      '如果发送失败，工具会返回错误信息。不要重试超过 1 次。',
+      '用户要求产出文件时，先写入文件再发送',
     ],
     parameters: Type.Object({
       filePath: Type.String({ description: '要发送的文件路径（项目目录内的绝对路径或相对路径）' }),
@@ -1278,7 +1284,7 @@ export default function wechatManager(pi: ExtensionAPI) {
       
       try {
         const stats = statSync(resolvedPath);
-        await socketClient.request('send_file_to_wechat', {
+        await socketClient.request('wechat_send_file', {
           userId: lastWechatUser,
           filePath: resolvedPath,
           fileName: params.fileName,
@@ -1292,14 +1298,12 @@ export default function wechatManager(pi: ExtensionAPI) {
   });
   
   pi.registerTool({
-    name: 'send_image_to_wechat',
+    name: 'wechat_send_image',
     label: 'Send Image to WeChat',
-    description: '发送项目目录中的图片到当前微信对话。用于将 AI 生成的图表、截图等直接发给微信用户。',
+    description: '发送图片到微信。用于将 AI 生成的图表、截图等直接发给微信用户（支持预览）。',
     promptSnippet: '发送项目目录中的图片到微信（可预览）',
     promptGuidelines: [
-      '当用户通过微信要求生成图表/截图/图片时，先生成图片文件再用 send_image_to_wechat 发送。',
-      '只能发送项目工作目录内的图片（安全限制）。',
-      '如果发送失败不要重试超过 1 次。',
+      '用户要求生成图表/截图/图片时，先生成图片文件再发送',
     ],
     parameters: Type.Object({
       imagePath: Type.String({ description: '要发送的图片路径（项目目录内的绝对路径或相对路径，支持 png/jpg/gif/webp）' }),
@@ -1321,7 +1325,7 @@ export default function wechatManager(pi: ExtensionAPI) {
       
       try {
         const stats = statSync(resolvedPath);
-        await socketClient.request('send_image_to_wechat', {
+        await socketClient.request('wechat_send_image', {
           userId: lastWechatUser,
           filePath: resolvedPath,
         });
@@ -1339,10 +1343,8 @@ export default function wechatManager(pi: ExtensionAPI) {
     description: '通知用户任务进度。仅在长任务的关键节点使用（调研完成、分析完成、代码生成等）。短任务不要使用。',
     promptSnippet: '通知微信用户任务进度（长任务时使用）',
     promptGuidelines: [
-      '只有当任务比较复杂（预计超过1分钟）时才使用此工具。',
-      '在关键节点调用：调研完成、分析完成、代码生成、遇到问题等。',
-      '短任务不要使用，避免过度打扰用户。',
-      '消息会带 session 名称和已运行时间。',
+      '在关键节点调用：调研完成、分析完成、代码生成、遇到问题等',
+      '消息会带 session 名称和已运行时间',
     ],
     parameters: Type.Object({
       message: Type.String({ description: '进度描述，如：调研完成，正在分析...' }),
@@ -1418,7 +1420,7 @@ export default function wechatManager(pi: ExtensionAPI) {
         }
         
         // 发送图片到微信
-        await socketClient.request('send_image_to_wechat', {
+        await socketClient.request('wechat_send_image', {
           userId: lastWechatUser,
           filePath: screenshotPath,
         });
@@ -1439,7 +1441,6 @@ export default function wechatManager(pi: ExtensionAPI) {
     promptGuidelines: [
       '创建定时任务时，和用户确认后再创建',
       '支持自然语言时间描述，如：每天早上9点、每30分钟',
-      '任务执行结果会通过微信通知',
     ],
     parameters: Type.Object({
       action: Type.Union([Type.Literal('create'), Type.Literal('list'), Type.Literal('remove')]),

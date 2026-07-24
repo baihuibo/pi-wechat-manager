@@ -5,7 +5,6 @@
 import { createServer, Socket } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { existsSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { DaemonState } from './daemon-state.js';
 import {
   SOCKET_PATH,
@@ -13,8 +12,6 @@ import {
   HTTP_PORT,
   ensureDirectories,
   loadConfig,
-  loadCredentials,
-  saveCredentials,
   loadAliases,
   saveAliases,
   loadSessionRegistry,
@@ -56,37 +53,42 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       const isNew = !state.sessionRegistry.has(sessionId);
       
       state.register(sessionId, pid, cwd, socket);
+
+      // 清除启动追踪（启动成功了）
+      if (state.startupTracker.has(sessionId)) {
+        state.clearStartup(sessionId);
+        console.log(`[启动] ${sessionId.slice(0,8)} 连接成功，清除启动追踪`);
+      }
       
       // 保存注册表到磁盘
       const { saveSessionRegistry } = await import('./config.js');
       saveSessionRegistry(state.sessionRegistry);
       
-      // 只有注册表里没有的 sessionId 才视为新 pi
-      if (isNew && state.pendingNewSession) {
-        state.defaultSessionId = sessionId;
-        console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
+      // /new 命令的待投递消息：按 sessionId 精确匹配（pi 用 --session-id 启动）
+      const pendingMessages = state.pendingNewMessages.get(sessionId);
+      if (pendingMessages) {
+        state.pendingNewMessages.delete(sessionId);
         
-        // 取第一个待投递的消息批次（FIFO）
-        const pendingEntries = Array.from(state.pendingNewMessages.entries());
-        if (pendingEntries.length > 0) {
-          const [key, messages] = pendingEntries[0];
-          state.pendingNewMessages.delete(key);
-          console.log(`[状态] 投递 ${messages.length} 条消息给 ${sessionId.slice(0,8)}（绑定名: ${key}）`);
-          
-          for (const msg of messages) {
-            state.enqueueMessage(sessionId, { ...msg, sessionId });
-          }
+        // 清理对应的超时定时器
+        const timer = state.pendingNewTimers.get(sessionId);
+        if (timer) { clearTimeout(timer); state.pendingNewTimers.delete(sessionId); }
+        
+        // 只有注册表里没有的 sessionId 才视为新 pi
+        if (isNew) {
+          state.defaultSessionId = sessionId;
+          console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
         }
         
-        // 没有更多待投递消息时清除标记
-        if (state.pendingNewMessages.size === 0) {
-          state.pendingNewSession = false;
+        console.log(`[状态] 投递 ${pendingMessages.length} 条 /new 消息给 ${sessionId.slice(0,8)}`);
+        for (const msg of pendingMessages) {
+          state.enqueueMessage(sessionId, { ...msg, sessionId });
         }
       }
       
       // 投递队列中的消息
       const queued = state.dequeueMessages(sessionId);
       if (queued.length > 0) {
+        console.log(`[队列] 投递 ${queued.length} 条缓存消息给 ${sessionId.slice(0,8)}`);
         for (const msg of queued) {
           state.sendToSession(sessionId, 'wechat_message', msg);
         }
@@ -212,30 +214,6 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       const { userId, status } = params;
       try {
         await wechatBridge.sendTyping(userId, status);
-        respond({ ok: true });
-      } catch (e: any) {
-        respond({ ok: false, error: e.message });
-      }
-      break;
-    }
-    
-    case 'send_file_to_wechat': {
-      // 发送文件到微信
-      const { userId, filePath, fileName } = params;
-      try {
-        await wechatBridge.sendFile(userId, filePath, fileName);
-        respond({ ok: true });
-      } catch (e: any) {
-        respond({ ok: false, error: e.message });
-      }
-      break;
-    }
-    
-    case 'send_image_to_wechat': {
-      // 发送图片到微信
-      const { userId, filePath } = params;
-      try {
-        await wechatBridge.sendImage(userId, filePath);
         respond({ ok: true });
       } catch (e: any) {
         respond({ ok: false, error: e.message });
@@ -420,6 +398,7 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
           files,
           timestamp: Date.now(),
           retries: 0,
+          expiresAt: 0,
         });
         // TODO: 可选自动 spawn pi
       }
@@ -441,7 +420,7 @@ function startSocketServer(): void {
   const server = createServer((socket) => {
     let buffer = '';
     
-    socket.on('data', (data) => {
+    socket.on('data', async (data) => {
       buffer += data.toString();
       
       // 处理完整的消息（以换行分隔）
@@ -452,7 +431,7 @@ function startSocketServer(): void {
         if (line.trim()) {
           try {
             const msg = JSON.parse(line);
-            handleSocketMessage(socket, msg);
+            await handleSocketMessage(socket, msg);
           } catch (e) {
             console.error('[Socket] 解析消息失败:', e);
           }
@@ -566,6 +545,7 @@ function startHeartbeatChecker(): void {
   
   setInterval(() => {
     state.cleanupStaleConnections(config.heartbeatTimeoutMs);
+    state.cleanupExpiredMessages();
   }, config.heartbeatIntervalMs);
 }
 

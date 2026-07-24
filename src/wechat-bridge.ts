@@ -17,7 +17,6 @@ export class WechatBridge {
   private pollAbort: AbortController | null = null;
   private state: DaemonState;
   private welcomeSent = false;
-  
   // 是否已发送欢迎消息
   
   constructor(state: DaemonState) {
@@ -153,6 +152,13 @@ export class WechatBridge {
     // 路由消息
     const targetSessionId = await this.routeMessage(message);
     
+    // /new 创建中的 session，拒绝消息
+    if (targetSessionId === '__pending__') {
+      console.log('[微信] 目标 session 正在 /new 创建中，拒绝消息');
+      this.sendText(message.userId, '⏳ pi 尚未启动完成，请稍后再发消息').catch(() => {});
+      return;
+    }
+    
     if (!targetSessionId) {
       console.log('[微信] 无法路由消息，没有可用的 session');
       this.sendText(message.userId, '❌ 没有可用的 pi session，请先启动 pi').catch(() => {});
@@ -168,6 +174,12 @@ export class WechatBridge {
       if (spaceIndex > 0) {
         messageText = messageText.slice(spaceIndex + 1).trim();
       }
+    }
+    
+    // 空消息检查（@mention 后没有正文，也没有图片）
+    if (!messageText && !message.imageUrls?.length) {
+      this.sendText(message.userId, '❌ 请发送消息内容').catch(() => {});
+      return;
     }
     
     // 构造消息数据
@@ -206,15 +218,49 @@ export class WechatBridge {
       this.state.setLastTask(targetSessionId, messageText.slice(0, 200));
       this.state.sendToSession(targetSessionId, 'wechat_message', messageData);
     } else {
-      console.log(`[微信] pi session 未连接，尝试自动启动 pi...`);
+      // ===== 启动追踪 + 防重复启动 =====
+
+      // 检查是否正在启动中
+      if (this.state.isStartupPending(targetSessionId)) {
+        const attempt = this.state.startupTracker.get(targetSessionId)!;
+        const elapsed = Math.floor((Date.now() - attempt.startedAt) / 1000);
+        console.log(`[微信] pi 正在启动中（${elapsed}s），跳过重复启动`);
+        this.sendText(message.userId, `⏳ pi 正在启动中（${elapsed}s），请稍候...`).catch(() => {});
+        // 仍然入队，等连接后投递
+        this.state.enqueueMessage(targetSessionId, {
+          id: `msg_${Date.now()}`,
+          sessionId: targetSessionId,
+          userId: message.userId,
+          text: message.text,
+          images: messageData.images,
+          timestamp: Date.now(),
+          retries: 0,
+          expiresAt: 0, // enqueueMessage 会覆盖
+        });
+        return;
+      }
+
+      // 检查上次是否启动失败
+      if (this.state.hasStartupFailed(targetSessionId)) {
+        console.log(`[微信] pi 上次启动失败，不再自动启动`);
+        this.sendText(message.userId, '⚠️ pi 上次启动失败，请手动打开终端运行 pi。消息已缓存').catch(() => {});
+        this.state.enqueueMessage(targetSessionId, {
+          id: `msg_${Date.now()}`,
+          sessionId: targetSessionId,
+          userId: message.userId,
+          text: message.text,
+          images: messageData.images,
+          timestamp: Date.now(),
+          retries: 0,
+          expiresAt: 0,
+        });
+        return;
+      }
+
+      // 注册启动追踪
+      this.state.setStartup(targetSessionId, message.userId);
       
-      // 通知用户正在启动
-      this.sendText(message.userId, '🚀 没有活跃的 pi，正在尝试启动...').catch(() => {});
-      
-      // 尝试自动启动 pi
-      const spawned = await this.spawnPiSession(targetSessionId);
-      
-      // 入队消息（包含 userId，用于后续回复）
+      // 入队消息
       this.state.setLastTask(targetSessionId, message.text?.slice(0, 200) || '');
       this.state.enqueueMessage(targetSessionId, {
         id: `msg_${Date.now()}`,
@@ -224,14 +270,35 @@ export class WechatBridge {
         images: messageData.images,
         timestamp: Date.now(),
         retries: 0,
+        expiresAt: 0,
       });
       
+      // 分阶段启动
+      this.state.updateStartupStage(targetSessionId, 'starting');
+      await this.sendText(message.userId, '⏳ 正在准备启动脚本...');
+      
+      const spawned = await this.spawnPiSession(targetSessionId);
+      
       if (spawned) {
-        console.log(`[微信] pi 已启动，消息已入队等待连接`);
-        this.sendText(message.userId, '⏳ pi 启动中，消息已缓存，连接后会自动处理').catch(() => {});
+        this.state.updateStartupStage(targetSessionId, 'waiting_connect');
+        await this.sendText(message.userId, '⏳ 终端已打开，等待 pi 连接...');
+        
+        // 等待 pi 连接（最多 15 秒）
+        const connected = await this.waitForPiConnect(targetSessionId, 15_000);
+        
+        if (connected) {
+          this.state.clearStartup(targetSessionId);
+          console.log(`[微信] pi 已连接: ${targetSessionId.slice(0, 8)}`);
+          // 队列消息由 daemon register handler 投递
+        } else {
+          this.state.updateStartupStage(targetSessionId, 'timed_out');
+          console.log(`[微信] pi 连接超时: ${targetSessionId.slice(0, 8)}`);
+          await this.sendText(message.userId, '❌ pi 启动超时（15s），请检查终端窗口。之后发送的消息会再次尝试启动');
+        }
       } else {
-        console.log(`[微信] pi 启动失败，消息已入队`);
-        this.sendText(message.userId, '⚠️ pi 启动失败，消息已缓存，请稍后重试或手动启动 pi').catch(() => {});
+        this.state.updateStartupStage(targetSessionId, 'failed');
+        console.log(`[微信] pi 启动失败: ${targetSessionId.slice(0, 8)}`);
+        await this.sendText(message.userId, '⚠️ pi 启动脚本执行失败，请手动打开终端运行 pi');
       }
     }
   }
@@ -509,21 +576,21 @@ export class WechatBridge {
           message = '来自微信';
         }
         
-        // 创建启动脚本（让 pi 自己创建 session）
+        // 创建启动脚本到临时目录
         const { writeFileSync, chmodSync } = await import('node:fs');
         const { join } = await import('node:path');
-        const scriptPath = join(projectPath, '.pi-start.sh');
-        
-        // 使用 --name 参数设置 session 名称，pi 会自动创建 session
+        const { tmpdir } = await import('node:os');
         const sessionName = aliasName || `wechat-${Date.now()}`;
-        const scriptContent = `#!/bin/bash\ncd "${projectPath}" 2>&1 || { echo "目录不存在: ${projectPath}"; read; exit 1; }\npi --name "${sessionName}" --approve 2>&1 || { echo \"pi 启动失败\"; read; }\n`;
+        const scriptPath = join(tmpdir(), `pi-new-${sessionName}.sh`);
+        
+        const scriptContent = `#!/bin/bash\ncd "${projectPath}" || { echo "目录不存在: ${projectPath}"; read; exit 1; }\npi --session-id "${sessionName}" --approve 2>&1 || { echo "pi 启动失败"; read; }\nrm -- "$0" 2>/dev/null\n`;
         writeFileSync(scriptPath, scriptContent, 'utf-8');
         chmodSync(scriptPath, '755');
         
         console.log(`[微信] 启动脚本: ${scriptPath}`);
         console.log(`[微信] 脚本内容:\n${scriptContent}`);
         
-        // 消息入队，key 为 sessionName（确保发给正确的 pi）
+        // 消息入队，key 为 sessionName（pi 用 --session-id 启动，register 时精确匹配）
         const pendingKey = sessionName;
         if (!this.state.pendingNewMessages.has(pendingKey)) {
           this.state.pendingNewMessages.set(pendingKey, []);
@@ -536,30 +603,27 @@ export class WechatBridge {
           images: [],
           timestamp: Date.now(),
           retries: 0,
+          expiresAt: 0,
         });
         
-        this.state.pendingNewSession = true;
-        
         // 启动终端 + pi
+        await this.sendText(userId, '⏳ 正在准备启动脚本...');
         const child = await this.spawnTerminal(scriptPath);
         child.unref();
         
-        // 10s 超时检测
-        const timer = setTimeout(() => {
-          if (this.state.pendingNewMessages.has(pendingKey)) {
-            this.state.pendingNewMessages.delete(pendingKey);
-            console.log(`[微信] /new 超时: ${pendingKey}`);
-            if (this.state.pendingNewMessages.size === 0) {
-              this.state.pendingNewSession = false;
-            }
-            this.sendText(userId, `⏰ 创建 pi 超时（10s），请检查终端窗口`).catch(() => {});
-          }
-          this.state.pendingNewTimers.delete(pendingKey);
-        }, 10000);
-        this.state.pendingNewTimers.set(pendingKey, timer);
+        await this.sendText(userId, '⏳ 终端已打开，等待 pi 连接...');
         
-        // 发送启动消息
-        await this.sendText(userId, `⏳ 正在启动 pi...`);
+        // 等待 pi 连接（15s 超时，与自动唤起一致）
+        const connected = await this.waitForPiConnect(pendingKey, 15_000);
+        
+        if (connected) {
+          console.log(`[微信] /new pi 已连接: ${pendingKey}`);
+          // 消息已由 daemon register handler 投递
+        } else {
+          this.state.pendingNewMessages.delete(pendingKey);
+          console.log(`[微信] /new 超时: ${pendingKey}`);
+          this.sendText(userId, `⏰ 创建 pi 超时（15s），请检查终端窗口`).catch(() => {});
+        }
         break;
       }
       
@@ -924,6 +988,12 @@ export class WechatBridge {
           console.log(`[微信] 通过 session ID @${target} 路由到 session: ${matchedSession.id}`);
           return matchedSession.id;
         }
+        
+        // 3. 检查是否正在 /new 创建中（pendingNewMessages 里的 key 即为 --session-id）
+        if (this.state.pendingNewMessages.has(target)) {
+          console.log(`[微信] @${target} 正在 /new 创建中，拒绝消息`);
+          return '__pending__';
+        }
       }
     }
     
@@ -984,11 +1054,9 @@ export class WechatBridge {
     return spawn('open', ['-a', 'Terminal.app', scriptPath], { detached: true, stdio: 'ignore' });
   }
   
-  // 自动启动 pi session（--no-session 模式）
+  // 自动启动 pi session（复用 spawnTerminal，自动检测 Ghostty / Terminal.app）
   private async spawnPiSession(sessionId: string): Promise<boolean> {
     try {
-      const { spawn } = await import('node:child_process');
-      
       // 获取 session 的 cwd
       const { getSession } = await import('./session-discover.js');
       const session = getSession(sessionId);
@@ -996,26 +1064,19 @@ export class WechatBridge {
       
       console.log(`[微信] 启动 pi: session=${sessionId.slice(0, 8)}, cwd=${cwd}`);
       
-      // 创建启动脚本（使用 --session-id 和 cd）
+      // 创建启动脚本到临时目录
       const { writeFileSync, chmodSync } = await import('node:fs');
       const { join } = await import('node:path');
-      const scriptPath = join(cwd, '.pi-start.sh');
-      const scriptContent = `#!/bin/bash\ncd "${cwd}" 2>&1 || { echo "目录不存在: ${cwd}"; read; exit 1; }\npi --session-id "${sessionId}" --approve 2>&1 || { echo \"pi 启动失败\"; read; }\n`;
+      const { tmpdir } = await import('node:os');
+      const scriptPath = join(tmpdir(), `pi-start-${sessionId.slice(0, 8)}.sh`);
+      const scriptContent = `#!/bin/bash\ncd "${cwd}" || { echo "目录不存在: ${cwd}"; read; exit 1; }\npi --session-id "${sessionId}" --approve 2>&1 || { echo "pi 启动失败"; read; }\nrm -- "$0" 2>/dev/null\n`;
       writeFileSync(scriptPath, scriptContent, 'utf-8');
       chmodSync(scriptPath, '755');
       
       console.log(`[微信] 启动脚本: ${scriptPath}`);
       
-      // 在 Ghostty 中启动 pi
-      const child = spawn('open', [
-        '-na', 'Ghostty.app',
-        '--args',
-        '-e', scriptPath
-      ], {
-        detached: true,
-        stdio: 'ignore',
-      });
-      
+      // 复用 spawnTerminal（自动检测 Ghostty，回退 Terminal.app）
+      const child = await this.spawnTerminal(scriptPath);
       child.unref();
       
       console.log(`[微信] pi 已启动: session=${sessionId.slice(0, 8)}`);
@@ -1024,6 +1085,25 @@ export class WechatBridge {
       console.error('[微信] 启动 pi 失败:', e);
       return false;
     }
+  }
+  
+  // 等待 pi 连接（轮询 connections，最多 timeoutMs 毫秒）
+  private waitForPiConnect(sessionId: string, timeoutMs: number): Promise<boolean> {
+    return new Promise(resolve => {
+      const start = Date.now();
+      const check = () => {
+        if (this.state.connections.has(sessionId) && this.state.connections.get(sessionId)?.socket.writable) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - start > timeoutMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(check, 1000);
+      };
+      check();
+    });
   }
   
   // 获取状态

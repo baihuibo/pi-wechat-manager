@@ -26,6 +26,15 @@ export interface WechatStatus {
   running: boolean;
 }
 
+// 启动追踪
+export interface StartupAttempt {
+  sessionId: string;
+  userId: string;
+  stage: 'starting' | 'launching_terminal' | 'waiting_connect' | 'timed_out' | 'failed';
+  startedAt: number;
+  lastFeedbackAt: number;
+}
+
 // 消息队列项
 export interface QueuedMessage {
   id: string;
@@ -36,6 +45,7 @@ export interface QueuedMessage {
   files?: string[];
   timestamp: number;
   retries: number;
+  expiresAt: number;
 }
 
 // 定时任务
@@ -82,6 +92,9 @@ export class DaemonState {
   
   // Session 注册表：见过一次的 sessionId 永久标记（持久化到 JSON）
   sessionRegistry: Set<string> = new Set();
+  
+  // 启动追踪表（sessionId → 启动尝试）
+  startupTracker: Map<string, StartupAttempt> = new Map();
   
   // 定时任务列表
   cronTasks: Map<string, CronTask> = new Map();
@@ -179,9 +192,49 @@ export class DaemonState {
     }
   }
   
-  // 设置持久模式
-  // 添加消息到队列
+  // ===== 启动追踪 =====
+  isStartupPending(sessionId: string): boolean {
+    const attempt = this.startupTracker.get(sessionId);
+    if (!attempt) return false;
+    // 超过 60s 的旧记录视为过期
+    if (Date.now() - attempt.startedAt > 60000) {
+      this.startupTracker.delete(sessionId);
+      return false;
+    }
+    return attempt.stage !== 'timed_out' && attempt.stage !== 'failed';
+  }
+  
+  hasStartupFailed(sessionId: string): boolean {
+    const attempt = this.startupTracker.get(sessionId);
+    if (!attempt) return false;
+    return attempt.stage === 'timed_out' || attempt.stage === 'failed';
+  }
+  
+  setStartup(sessionId: string, userId: string): void {
+    this.startupTracker.set(sessionId, {
+      sessionId, userId,
+      stage: 'starting',
+      startedAt: Date.now(),
+      lastFeedbackAt: Date.now(),
+    });
+  }
+  
+  updateStartupStage(sessionId: string, stage: StartupAttempt['stage']): void {
+    const attempt = this.startupTracker.get(sessionId);
+    if (attempt) {
+      attempt.stage = stage;
+      attempt.lastFeedbackAt = Date.now();
+    }
+  }
+  
+  clearStartup(sessionId: string): void {
+    this.startupTracker.delete(sessionId);
+  }
+  
+  // ===== 消息队列 =====
+  // 添加消息到队列（自动设置 2 分钟 TTL）
   enqueueMessage(sessionId: string, message: QueuedMessage): void {
+    message.expiresAt = Date.now() + 120_000;
     if (!this.messageQueue.has(sessionId)) {
       this.messageQueue.set(sessionId, []);
     }
@@ -194,11 +247,36 @@ export class DaemonState {
     }
   }
   
-  // 获取并移除队列中的消息
+  // 获取并移除队列中的消息（过滤过期消息）
   dequeueMessages(sessionId: string): QueuedMessage[] {
-    const messages = this.messageQueue.get(sessionId) || [];
+    const all = this.messageQueue.get(sessionId) || [];
     this.messageQueue.set(sessionId, []);
-    return messages;
+    
+    const now = Date.now();
+    const expired = all.filter(m => m.expiresAt <= now);
+    if (expired.length > 0) {
+      console.log(`[队列] ${sessionId.slice(0,8)}: 丢弃 ${expired.length} 条过期消息`);
+    }
+    
+    return all.filter(m => m.expiresAt > now);
+  }
+  
+  // 清理所有队列中的过期消息（定时调用）
+  cleanupExpiredMessages(): number {
+    let total = 0;
+    for (const [sessionId, queue] of this.messageQueue.entries()) {
+      const before = queue.length;
+      const now = Date.now();
+      const valid = queue.filter(m => m.expiresAt > now);
+      if (valid.length < before) {
+        this.messageQueue.set(sessionId, valid);
+        total += before - valid.length;
+      }
+    }
+    if (total > 0) {
+      console.log(`[队列] 清理了 ${total} 条全局过期消息`);
+    }
+    return total;
   }
   
   // 获取状态摘要
@@ -409,11 +487,13 @@ export class DaemonState {
     for (const [id, conn] of this.connections) {
       if (now - conn.lastHeartbeat.getTime() > timeoutMs) {
         stale.push(id);
+        // 杀掉卡死的 pi 进程，对应的 Ghostty 窗口也会自动关闭
+        try { process.kill(conn.pid, 'SIGTERM'); } catch {}
       }
     }
     
     for (const id of stale) {
-      console.log(`[状态] Session ${id} 心跳超时，断开连接`);
+      console.log(`[状态] Session ${id} 心跳超时，已终止进程并断开连接`);
       this.unregister(id);
     }
     
