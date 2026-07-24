@@ -869,6 +869,17 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     
+    // 从 process.argv 读取 --name（最可靠，不依赖 session 文件写入时序）
+    if (!sessionName) {
+      const argv = process.argv;
+      const idx = argv.indexOf('--name');
+      if (idx !== -1 && idx + 1 < argv.length) {
+        sessionName = argv[idx + 1];
+        console.log(`[微信] 从进程参数读取名称: ${sessionName}`);
+        updateStatusBar(ctx);
+      }
+    }
+    
     // 静默连接
     if (isDaemonRunning()) {
       const connected = await connectToDaemon(ctx);
@@ -877,8 +888,7 @@ export default function wechatManager(pi: ExtensionAPI) {
       }
     }
     
-    // 延迟读取 pi --name（session 文件可能还没写完）
-    // 500ms 后第一次尝试，1s 后第二次
+    // 兜底：500ms/1s 后再从 session 文件尝试（覆盖极端时序）
     setTimeout(() => tryLoadSessionName(ctx), 500);
     setTimeout(() => tryLoadSessionName(ctx), 1000);
   });
@@ -1129,18 +1139,41 @@ export default function wechatManager(pi: ExtensionAPI) {
             return;
           }
           const [name, targetSession] = restArgs.split(/\s+/);
+          const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
+          
           if (!name) {
-            // 显示当前 session 的别名
-            const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
+            // 无参数：显示当前别名 + 全部别名表
             const currentAlias = Object.entries(aliases).find(([_, v]) => v === sessionId);
+            const lines: string[] = [];
             if (currentAlias) {
-              ctx.ui.notify(`当前 session 别名: @${currentAlias[0]}`, 'info');
+              lines.push(`当前 session 别名: @${currentAlias[0]}`);
+            } else if (sessionName) {
+              lines.push(`当前 session 名称: @${sessionName} (仅本地，未存入别名表)`);
             } else {
-              ctx.ui.notify('当前 session 没有设置别名', 'info');
+              lines.push(`当前 session: ${sessionId.slice(0, 8)}... (无别名)`);
+            }
+            
+            if (Object.keys(aliases).length > 0) {
+              lines.push('');
+              lines.push('**全部别名：**');
+              for (const [k, v] of Object.entries(aliases)) {
+                lines.push(`  @${k} → ${v.slice(0, 8)}...`);
+              }
+            }
+            
+            ctx.ui.notify(lines.join('\n'), 'info');
+            if (!currentAlias && !sessionName) {
               ctx.ui.notify('用法: /wechat alias <名称>', 'info');
             }
             return;
           }
+          
+          // 如果 name 是已存在的别名 → 查询
+          if (aliases[name] && !targetSession) {
+            ctx.ui.notify(`@${name} → ${aliases[name]}`, 'info');
+            return;
+          }
+          
           if (!targetSession) {
             // 给当前 session 设置别名
             const result = await socketClient.request('set_alias', { name, sessionId }) as any;
@@ -1158,6 +1191,8 @@ export default function wechatManager(pi: ExtensionAPI) {
           if (result.updated) {
             ctx.ui.notify(`⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}`, 'warning');
           } else {
+
+[400 more lines in file. Use offset=1171 to continue.]
             ctx.ui.notify(`✅ 已设置别名: @${name} → ${targetSession.slice(0, 8)}...`, 'info');
           }
           break;
