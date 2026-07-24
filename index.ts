@@ -432,6 +432,89 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
         }
         break;
       }
+      
+      case 'reset': {
+        // 清空上下文
+        if (globalPi) {
+          globalPi.sendUserMessage('/compact', { deliverAs: 'steer' });
+        }
+        if (socketClient) {
+          await socketClient.request('send_to_wechat', { 
+            userId, 
+            text: '♻️ 已触发上下文压缩' 
+          });
+        }
+        break;
+      }
+      
+      case 'compact': {
+        // 触发压缩
+        if (globalPi) {
+          globalPi.sendUserMessage('/compact', { deliverAs: 'steer' });
+        }
+        if (socketClient) {
+          await socketClient.request('send_to_wechat', { 
+            userId, 
+            text: '♻️ 正在压缩上下文...' 
+          });
+        }
+        break;
+      }
+      
+      case 'model': {
+        const modelName = args?.modelName;
+        
+        if (!modelName) {
+          // /model → 显示可用模型
+          try {
+            const { readFileSync, existsSync } = await import('node:fs');
+            const { homedir } = await import('node:os');
+            const { join } = await import('node:path');
+            
+            let listText = '**🤖 可用模型：**\n\n';
+            const modelsPath = join(homedir(), '.pi', 'agent', 'models.json');
+            if (existsSync(modelsPath)) {
+              const models = JSON.parse(readFileSync(modelsPath, 'utf-8'));
+              if (Array.isArray(models) && models.length > 0) {
+                for (const m of models.slice(0, 15)) {
+                  listText += `- ${m.name || m.id}\n`;
+                }
+                listText += `\n当前: ${models[0]?.name || '?'}`;
+              } else {
+                listText += '（空配置）';
+              }
+            } else {
+              listText += '（未找到 models.json）';
+            }
+            
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { userId, text: listText });
+            }
+          } catch (e: any) {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `❌ 读取模型失败: ${e.message}` 
+              });
+            }
+          }
+        } else {
+          // /model <name> → 切换
+          if (globalPi && socketClient) {
+            await socketClient.request('send_to_wechat', { 
+              userId, 
+              text: `🔄 正在切换到 ${modelName}...` 
+            });
+            globalPi.sendUserMessage(`/model ${modelName}`, { deliverAs: 'steer' });
+          } else if (socketClient) {
+            await socketClient.request('send_to_wechat', { 
+              userId, 
+              text: '❌ pi 未就绪' 
+            });
+          }
+        }
+        break;
+      }
     }
   });
 }
@@ -1034,9 +1117,22 @@ export default function wechatManager(pi: ExtensionAPI) {
     progressMessages = [];
   });
   
-  // ===== agent_settled：重置对话状态 =====
+  // ===== agent_settled：重置对话状态 + 上下文告警 =====
   pi.on('agent_settled', async (_event, ctx) => {
     wechatConversationActive = false;
+    
+    // 检查上下文使用率
+    try {
+      if (lastWechatUser && socketClient) {
+        const usage = ctx.getContextUsage();
+        if (usage && usage.tokens > 0 && usage.percent !== undefined && usage.percent > 70) {
+          await socketClient.request('send_to_wechat', {
+            userId: lastWechatUser,
+            text: `⚠️ 上下文使用 ${Math.round(usage.percent)}%（${usage.tokens.toLocaleString()} tokens），建议 /compact`,
+          });
+        }
+      }
+    } catch {}
   });
   
   // ===== 注册工具 =====

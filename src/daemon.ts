@@ -53,10 +53,18 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
     case 'register': {
       const { sessionId, pid, cwd } = params;
       const isNew = !state.connections.has(sessionId);
+      const isReconnect = state.recentlyDisconnected.has(sessionId);
+      
+      // 重连的 session 不算'新'
+      if (isReconnect) {
+        state.recentlyDisconnected.delete(sessionId);
+        console.log(`[状态] Session ${sessionId.slice(0,8)} 重连`);
+      }
+      
       state.register(sessionId, pid, cwd, socket);
       
-      // 如果是新连接的 pi，且是通过 /new 命令启动的
-      if (isNew && state.pendingNewSession) {
+      // 只有真正新连接且不是重连的，才路由 pending 消息
+      if (isNew && !isReconnect && state.pendingNewSession) {
         state.defaultSessionId = sessionId;
         console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
         
@@ -313,6 +321,20 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       // 转发命令到微信
       const { command, args, userId } = params;
       // 这个命令会被 wechat_bridge 处理
+      respond({ ok: true });
+      break;
+    }
+    
+    case 'wechat_command_result': {
+      // pi 扩展返回的命令结果 → 转发到微信
+      const { userId, text } = params;
+      if (userId && text) {
+        try {
+          await wechatBridge.sendText(userId, text);
+        } catch (e: any) {
+          console.error('[命令] 发送结果到微信失败:', e.message);
+        }
+      }
       respond({ ok: true });
       break;
     }

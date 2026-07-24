@@ -222,33 +222,31 @@ export class WechatBridge {
         const helpText = `**📱 可用命令：**
 
 **Session 管理：**
-- /new - 创建新 session
-- /new 消息 - 创建新 session 并发送消息
-- /new 名称 消息 - 创建新 session、设置名称、发送消息
-- /new /path 名称 消息 - 在指定路径创建
-- /switch <name|id> - 切换 session
+- /new - 创建新 pi
+- /new /path 名 消息 - 指定路径、名称、消息
+- /switch <id> - 切换 session
 - /sessions - 列出 sessions
 
-**任务控制：**
-- /stop - 停止当前 session
-- /stop <name|id> - 停止指定 session
-- /kill - 终止当前 session
-- /kill <name|id> - 终止指定 session
-- /progress - 查询当前 session 进度
-- /progress <name|id> - 查询指定 session 进度
+**AI 控制：**
+- /model - 查看可用模型
+- /model <名> - 切换模型
+- /compact - 压缩上下文
+- /stop - 停止当前操作
+- /kill - 终止 pi
+
+**定时任务：**
+- /cron - 查看列表
+- /cron <名> - 查看详情
+- /cron remove <名> - 删除
 
 **别名管理：**
-- /alias - 列出所有别名
-- /alias 名称 - 设置当前 session 别名
-- /alias 名称 <id> - 设置指定 session 别名
+- /alias - 列出别名
+- /alias <名> - 设置别名
 
 **其他：**
 - /status - 查看状态
-- /reset - 清空当前 session 上下文
-- /reset <name|id> - 清空指定 session 上下文
-
-**消息路由：**
-- @别名 消息 - 发送到指定 session`;
+- /progress - 查询进度
+- /help - 显示帮助`;
         await this.sendText(userId, helpText);
         break;
       }
@@ -462,6 +460,20 @@ export class WechatBridge {
         const child = await this.spawnTerminal(scriptPath);
         child.unref();
         
+        // 10s 超时检测
+        const timer = setTimeout(() => {
+          if (this.state.pendingNewMessages.has(pendingKey)) {
+            this.state.pendingNewMessages.delete(pendingKey);
+            console.log(`[微信] /new 超时: ${pendingKey}`);
+            if (this.state.pendingNewMessages.size === 0) {
+              this.state.pendingNewSession = false;
+            }
+            this.sendText(userId, `⏰ 创建 pi 超时（10s），请检查终端窗口`).catch(() => {});
+          }
+          this.state.pendingNewTimers.delete(pendingKey);
+        }, 10000);
+        this.state.pendingNewTimers.set(pendingKey, timer);
+        
         // 发送启动消息
         await this.sendText(userId, `⏳ 正在启动 pi...`);
         break;
@@ -638,6 +650,69 @@ export class WechatBridge {
         break;
       }
       
+      case 'cron': {
+        // /cron - 列表
+        // /cron remove <名称> - 删除
+        // /cron <名称> - 查看详情
+        const [sub, ...rest] = args.split(/\s+/);
+        
+        if (!sub) {
+          // /cron → 列表
+          const tasks = this.state.getCronTasks();
+          if (tasks.length === 0) {
+            await this.sendText(userId, '📭 没有定时任务');
+          } else {
+            let text = '**⏰ 定时任务：**\n\n';
+            for (const task of tasks) {
+              const status = task.status === 'confirmed' ? '⏳' :
+                             task.status === 'running' ? '🔄' :
+                             task.status === 'completed' ? '✅' :
+                             task.status === 'failed' ? '❌' : '📌';
+              const next = task.nextRun ? new Date(task.nextRun).toLocaleTimeString() : '-';
+              text += `${status} ${task.id.slice(-6)} | ${task.schedule} | ${next}\n`;
+            }
+            await this.sendText(userId, text);
+          }
+        } else if (sub === 'remove') {
+          // /cron remove <名称>
+          const taskName = rest.join(' ');
+          if (!taskName) {
+            await this.sendText(userId, '❌ 用法: /cron remove <任务名称>');
+            break;
+          }
+          const task = this.state.findCronTaskByName(taskName);
+          if (!task) {
+            await this.sendText(userId, `❌ 未找到任务: ${taskName}`);
+            break;
+          }
+          this.state.manageCronTask('remove', { taskId: task.id });
+          await this.sendText(userId, `✅ 已删除: ${task.schedule} ${task.task}`);
+        } else {
+          // /cron <名称> → 详情
+          const taskName = args;
+          const task = this.state.findCronTaskByName(taskName);
+          if (!task) {
+            await this.sendText(userId, `❌ 未找到任务: ${taskName}`);
+            break;
+          }
+          let text = `**⏰ ${task.schedule}**\n\n`;
+          text += `- 任务：${task.task}\n`;
+          text += `- 状态：${task.status}\n`;
+          text += `- Session：${task.sessionId.slice(0, 8)}...\n`;
+          if (task.nextRun) {
+            text += `- 下次执行：${new Date(task.nextRun).toLocaleString()}\n`;
+          }
+          if (task.lastRun) {
+            text += `- 上次执行：${new Date(task.lastRun).toLocaleString()}\n`;
+          }
+          if (task.lastResult) {
+            text += `- 结果：${task.lastResult}\n`;
+          }
+          await this.sendText(userId, text);
+        }
+        break;
+      }
+      
       case 'switch': {
         // 切换 session（支持 ID、短 ID、名称）
         const { listSessions } = await import('./session-discover.js');
@@ -678,6 +753,22 @@ export class WechatBridge {
       }
       
       default:
+        // pi 侧命令：/model、/compact
+        if (['model', 'compact'].includes(command)) {
+          const targetSessionId = this.state.defaultSessionId;
+          if (!targetSessionId) {
+            await this.sendText(userId, '❌ 没有活跃的 pi');
+            break;
+          }
+          const sent = this.sendWechatCommand(targetSessionId, command, {
+            modelName: args || undefined,
+            userId,
+          });
+          if (!sent) {
+            await this.sendText(userId, '❌ pi 未连接');
+          }
+          break;
+        }
         await this.sendText(userId, `未知命令：/${command}，输入 /help 查看帮助`);
     }
   }
@@ -865,5 +956,14 @@ export class WechatBridge {
       accountId: this.state.wechat.accountId,
       userId: this.state.wechat.userId,
     };
+  }
+  
+  // 发送命令到 pi 扩展（不经过 LLM）
+  private sendWechatCommand(sessionId: string, command: string, args: any): boolean {
+    return this.state.sendToSession(sessionId, 'wechat_command', {
+      command,
+      args,
+      userId: args?.userId || '',
+    });
   }
 }

@@ -76,6 +76,12 @@ export class DaemonState {
   // /new 命令的待投递消息，key=sessionName，value=队列消息（FIFO）
   pendingNewMessages: Map<string, QueuedMessage[]> = new Map();
   
+  // 最近断开连接的 session（用于区分重连和新连接）
+  recentlyDisconnected: Set<string> = new Set();
+  
+  // /new 超时定时器: key=sessionName, value=timeout handle
+  pendingNewTimers: Map<string, NodeJS.Timeout> = new Map();
+  
   // 定时任务列表
   cronTasks: Map<string, CronTask> = new Map();
   
@@ -102,6 +108,7 @@ export class DaemonState {
   // 注销连接
   unregister(sessionId: string): void {
     this.connections.delete(sessionId);
+    this.recentlyDisconnected.add(sessionId);
     console.log(`[状态] 注销 session: ${sessionId}`);
     
     if (this.defaultSessionId === sessionId) {
@@ -400,7 +407,20 @@ export class DaemonState {
       this.unregister(id);
     }
     
+    // 定期清理 recentlyDisconnected（保留 60s）
+    this.recentlyDisconnected.clear();
+    
     return stale;
+  }
+  
+  // 按名称查找 cron 任务
+  findCronTaskByName(name: string): CronTask | null {
+    for (const task of this.cronTasks.values()) {
+      if (task.task.includes(name) || task.schedule.includes(name)) {
+        return task;
+      }
+    }
+    return null;
   }
   
   // 向特定 session 发送消息
