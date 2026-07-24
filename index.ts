@@ -443,29 +443,12 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
         break;
       }
       
-      case 'reset': {
-        // 压缩上下文（等同 /compact）
-        if (ctx && socketClient) {
-          const sc = socketClient;
-          await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
-          ctx.compact({
-            onComplete: () => {
-              sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
-            },
-            onError: (e: any) => {
-              sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
-            },
-          });
-        }
-        break;
-      }
-      
+      case 'reset':
       case 'compact': {
+        // 压缩上下文
         if (ctx && socketClient) {
           const sc = socketClient;
-          // 通知开始
           await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
-          // 并行执行，完成/失败通知
           ctx.compact({
             onComplete: () => {
               sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
