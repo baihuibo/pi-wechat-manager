@@ -646,7 +646,6 @@ export class WechatBridge {
         }
         
         const sessionShort = targetSessionId.slice(0, 8);
-        const isDefault = targetSessionId === this.state.defaultSessionId;
         const progress = this.state.getProgress(targetSessionId);
         
         // 计算最后活跃时间
@@ -685,10 +684,6 @@ export class WechatBridge {
         if (progress.messages.length > 0) {
           const latest = progress.messages[progress.messages.length - 1];
           progressText += `- 最新进度：${latest}\n`;
-        }
-        
-        if (isDefault) {
-          progressText += `- 标记：⭐ 默认\n`;
         }
         
         await this.sendText(userId, progressText);
