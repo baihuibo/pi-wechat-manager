@@ -1191,8 +1191,6 @@ export default function wechatManager(pi: ExtensionAPI) {
           if (result.updated) {
             ctx.ui.notify(`⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}`, 'warning');
           } else {
-
-[400 more lines in file. Use offset=1171 to continue.]
             ctx.ui.notify(`✅ 已设置别名: @${name} → ${targetSession.slice(0, 8)}...`, 'info');
           }
           break;
