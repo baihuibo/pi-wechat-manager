@@ -430,7 +430,7 @@ export class WechatBridge {
         
         // 使用 --name 参数设置 session 名称，pi 会自动创建 session
         const sessionName = aliasName || `wechat-${Date.now()}`;
-        const scriptContent = `#!/bin/bash\ncd "${projectPath}"\npi --name "${sessionName}"\n`;
+        const scriptContent = `#!/bin/bash\ncd "${projectPath}"\npi --name "${sessionName}" --approve\n`;
         writeFileSync(scriptPath, scriptContent, 'utf-8');
         chmodSync(scriptPath, '755');
         
@@ -444,34 +444,16 @@ export class WechatBridge {
         const child = await this.spawnTerminal(scriptPath);
         child.unref();
         
-        // 延迟后发送消息给 pi（让 pi 创建 session）
-        setTimeout(async () => {
-          // 查找最新连接的 pi
-          let targetSessionId = this.state.defaultSessionId;
-          for (const [id, conn] of this.state.connections) {
-            if (conn.connectedAt.getTime() > Date.now() - 10000) {
-              targetSessionId = id;
-              break;
-            }
-          }
-          
-          if (targetSessionId) {
-            // 发送消息给 pi
-            const messageData = {
-              userId: userId,
-              text: message,
-              images: [],
-              timestamp: Date.now(),
-            };
-            this.state.sendToSession(targetSessionId, 'wechat_message', messageData);
-            console.log(`[微信] 发送消息给新 pi: ${message}`);
-            
-            // 发送成功消息
-            this.sendText(userId, `✅ pi 已连接，消息已发送`).catch(() => {});
-          } else {
-            this.sendText(userId, `⚠️ pi 启动超时，请稍后重试`).catch(() => {});
-          }
-        }, 5000);
+        // 消息入队（等待 pi 连接后自动投递）
+        this.state.enqueueMessage('__pending__', {
+          id: `msg_${Date.now()}`,
+          sessionId: '__pending__',
+          userId: userId,
+          text: message,
+          images: [],
+          timestamp: Date.now(),
+          retries: 0,
+        });
         
         // 发送启动消息
         await this.sendText(userId, `⏳ 正在启动 pi...`);
@@ -841,7 +823,7 @@ export class WechatBridge {
       const { writeFileSync, chmodSync } = await import('node:fs');
       const { join } = await import('node:path');
       const scriptPath = join(cwd, '.pi-start.sh');
-      const scriptContent = `#!/bin/bash\ncd "${cwd}"\npi --session-id "${sessionId}"\n`;
+      const scriptContent = `#!/bin/bash\ncd "${cwd}"\npi --session-id "${sessionId}" --approve\n`;
       writeFileSync(scriptPath, scriptContent, 'utf-8');
       chmodSync(scriptPath, '755');
       
