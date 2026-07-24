@@ -463,37 +463,28 @@ function updateStatusBar(ctx: ExtensionContext) {
   }
 }
 
-// 同步 session 名称（延迟读文件 → 注册别名 → 更新状态栏）
-async function syncSessionName(ctx?: Ctx): Promise<void> {
-  if (sessionName) return; // 已有名称，不需要同步
-  
-  // 最多重试 10 次，每次间隔 500ms（5s 总超时）
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    
-    try {
-      const { getSession } = await import('./src/session-discover.js');
-      const sessionInfo = getSession(sessionId);
-      if (sessionInfo?.name) {
-        sessionName = sessionInfo.name;
-        console.log(`[微信] 检测到 pi 名称: ${sessionName}`);
-        
-        // 同步到守护进程别名表
-        if (socketClient?.connected) {
-          try {
-            await socketClient.request('set_alias', { name: sessionName, sessionId });
-          } catch {}
-        }
-        
-        // 更新状态栏
-        if (ctx) updateStatusBar(ctx as ExtensionContext);
-        return;
+// 尝试加载 session 名称（单次尝试，不重试）
+// 读 session 文件 → 注册别名 → 更新状态栏；失败则尝试从别名表反向加载
+async function tryLoadSessionName(ctx?: Ctx): Promise<void> {
+  if (sessionName) return;
+
+  // 1. 从 session 文件读 pi --name
+  try {
+    const { getSession } = await import('./src/session-discover.js');
+    const info = getSession(sessionId);
+    if (info?.name) {
+      sessionName = info.name;
+      console.log(`[微信] 从 session 文件加载名称: ${sessionName}`);
+      if (socketClient?.connected) {
+        socketClient.request('set_alias', { name: sessionName, sessionId }).catch(() => {});
       }
-    } catch {}
-  }
-  
-  // 如果文件里没有 name，尝试从守护进程别名表反向加载
-  if (!sessionName && socketClient?.connected) {
+      if (ctx) updateStatusBar(ctx as ExtensionContext);
+      return;
+    }
+  } catch {}
+
+  // 2. 从守护进程别名表反向加载
+  if (socketClient?.connected) {
     try {
       const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
       for (const [alias, sid] of Object.entries(aliases)) {
@@ -551,18 +542,8 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       currentState = WechatState.DAEMON_CONNECTED;
     }
     
-    if (!sessionName) {
-      try {
-        const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
-        for (const [alias, sid] of Object.entries(aliases)) {
-          if (sid === sessionId) {
-            sessionName = alias;
-            console.log(`[微信] 从别名表加载名称: ${sessionName}`);
-            break;
-          }
-        }
-      } catch {}
-    }
+    // 连接成功后顺手加载名称
+    tryLoadSessionName(ctx);
     
     updateWechatStatus({
       loggedIn: result.wechat?.loggedIn || false,
@@ -590,6 +571,9 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
     lastWechatUser = userId;
     wechatConversationActive = true;
     sentCount = 0;
+    
+    // 通信时顺手检查名称是否已就绪
+    tryLoadSessionName();
     
     const content: any[] = [];
     if (text) content.push({ type: 'text', text: `[微信消息] ${text}` });
@@ -885,7 +869,7 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     
-    // 静默连接（守护进程不在就跳过，不报错）
+    // 静默连接
     if (isDaemonRunning()) {
       const connected = await connectToDaemon(ctx);
       if (!connected) {
@@ -894,8 +878,9 @@ export default function wechatManager(pi: ExtensionAPI) {
     }
     
     // 延迟读取 pi --name（session 文件可能还没写完）
-    // 同时确保别名同步到守护进程
-    syncSessionName(ctx);
+    // 500ms 后第一次尝试，1s 后第二次
+    setTimeout(() => tryLoadSessionName(ctx), 500);
+    setTimeout(() => tryLoadSessionName(ctx), 1000);
   });
   
   // ===== /wechat 命令 =====
