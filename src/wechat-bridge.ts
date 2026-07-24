@@ -761,10 +761,11 @@ export class WechatBridge {
             await this.sendText(userId, '❌ 没有活跃的 pi');
             break;
           }
-          const sent = this.sendWechatCommand(targetSessionId, command, {
-            modelName: args || undefined,
-            userId,
-          });
+          // 传参时区分命令类型
+          const cmdArgs: any = { userId };
+          if (command === 'model') cmdArgs.modelName = args || undefined;
+          if (command === 'context') cmdArgs.alias = args || undefined;
+          const sent = this.sendWechatCommand(targetSessionId, command, cmdArgs);
           if (!sent) {
             await this.sendText(userId, '❌ pi 未连接');
           }

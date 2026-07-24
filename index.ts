@@ -111,9 +111,9 @@ class SocketClient {
         this.socket = null;
       });
       
-      this.socket.on('error', (err) => {
+      this.socket.on('error', () => {
         clearTimeout(timer);
-        reject(err);
+        reject(new Error('连接失败'));
       });
     });
   }
@@ -258,13 +258,14 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         // 尝试自动重连
         if (isDaemonRunning()) {
-          const reconnected = await connectToDaemon(ctx);
-          if (reconnected) {
-            console.log('[微信] 自动重连成功');
-            return;
-          }
+          try {
+            const reconnected = await connectToDaemon(ctx);
+            if (reconnected) {
+              currentState = WechatState.DAEMON_CONNECTED;
+            }
+          } catch {}
         }
-        updateStatusBar(ctx);
+        if (ctx) updateStatusBar(ctx);
       }
     }, 30000);
     
@@ -448,30 +449,46 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       }
       
       case 'compact': {
-        // 触发压缩
-        if (globalPi) {
-          globalPi.sendUserMessage('/compact', { deliverAs: 'steer' });
-        }
-        if (socketClient) {
-          await socketClient.request('send_to_wechat', { 
-            userId, 
-            text: '♻️ 正在压缩上下文...' 
-          });
+        // 直接调用 ctx.compact()，不走 LLM
+        if (ctx) {
+          try {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: '♻️ 正在压缩上下文...' 
+              });
+            }
+            await ctx.compact();
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: '✅ 上下文压缩完成' 
+              });
+            }
+          } catch (e: any) {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `❌ 压缩失败: ${e.message}` 
+              });
+            }
+          }
         }
         break;
       }
       
       case 'context': {
         // /context 或 /context <别名>
-        // 查询上下文使用量
-        const targetAlias = args;
+        const alias = args?.alias;
         
-        if (targetAlias && socketClient) {
-          // 查询指定 session（暂不支持，提示）
-          await socketClient.request('send_to_wechat', { 
-            userId, 
-            text: '⚠️ /context <别名> 暂不支持，请用 @别名 切换到目标后再查' 
-          });
+        if (alias && alias !== 'undefined') {
+          // /context <别名> → 暂不支持跨 session 查询
+          if (socketClient) {
+            await socketClient.request('send_to_wechat', { 
+              userId, 
+              text: '⚠️ /context <别名> 暂不支持跨 session，请用 @别名 切换' 
+            });
+          }
         } else if (ctx) {
           try {
             const usage = ctx.getContextUsage();

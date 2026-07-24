@@ -470,8 +470,8 @@ function startSocketServer(): void {
       }
     });
     
-    socket.on('error', (err) => {
-      console.error('[Socket] 连接错误:', err.message);
+    socket.on('error', () => {
+      // 静默（避免 Connection error 刷屏）
     });
   });
   
