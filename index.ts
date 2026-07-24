@@ -192,15 +192,249 @@ let progressMessages: string[] = [];
 // 辅助函数
 // ============================================================================
 
-function isDaemonRunning(): boolean {
-  if (!existsSync(PID_FILE)) return false;
+// ============================================================================
+// 守护进程健康检查与启停
+// ============================================================================
+
+type DaemonHealth = 
+  | { status: 'healthy'; version: string }
+  | { status: 'version_mismatch'; runningVersion: string }
+  | { status: 'unresponsive'; reason: string }
+  | { status: 'zombie'; reason: string }
+  | { status: 'not_running' };
+
+// 读取 PID 文件中的 PID（含校验）
+function readDaemonPid(): number | null {
+  if (!existsSync(PID_FILE)) return null;
   try {
-    const pid = parseInt(readFileSync(PID_FILE, 'utf-8'));
+    const raw = readFileSync(PID_FILE, 'utf-8').trim();
+    const pid = parseInt(raw, 10);
+    if (!pid || pid <= 0) return null;
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+// 检查 PID 对应进程是否存活
+function isPidAlive(pid: number): boolean {
+  try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+// 检查端口是否被占用（TCP 连接探测）
+function checkPortOccupied(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const net = require('node:net') as typeof import('node:net');
+    const sock = net.createConnection({ port: HTTP_PORT, timeout: 500 }, () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.on('error', () => resolve(false));
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+  });
+}
+
+// 通过 HTTP 获取守护进程版本（带超时）
+function fetchDaemonVersion(timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const http = require('node:http') as typeof import('node:http');
+    const req = http.get(`http://localhost:${HTTP_PORT}/api/version`, { timeout: timeoutMs }, (res) => {
+      let data = '';
+      res.on('data', (chunk: string) => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          resolve(json.version || null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+// 全面健康检查
+async function checkDaemonHealth(): Promise<DaemonHealth> {
+  const pid = readDaemonPid();
+
+  // 1. 没有 PID 文件 → 未运行
+  if (pid === null) {
+    const portUsed = await checkPortOccupied();
+    if (portUsed) {
+      return { status: 'zombie', reason: `PID 文件缺失，但端口 ${HTTP_PORT} 被占用` };
+    }
+    return { status: 'not_running' };
+  }
+
+  // 2. PID 文件存在但进程已死 → 僵尸
+  if (!isPidAlive(pid)) {
+    return { status: 'zombie', reason: `PID ${pid} 已不存在` };
+  }
+
+  // 3. 进程存活，尝试 HTTP 获取版本
+  const version = await fetchDaemonVersion(3000);
+
+  // 4. HTTP 无响应 → 卡死
+  if (version === null) {
+    const portUsed = await checkPortOccupied();
+    if (!portUsed) {
+      return { status: 'unresponsive', reason: `进程 PID ${pid} 存活但端口 ${HTTP_PORT} 不可达（卡在启动中）` };
+    }
+    return { status: 'unresponsive', reason: `进程 PID ${pid} 存活但 HTTP 无响应（可能卡死）` };
+  }
+
+  // 5. 版本匹配 → 健康
+  if (version === DAEMON_VERSION) {
+    return { status: 'healthy', version };
+  }
+
+  // 6. 版本不匹配
+  return { status: 'version_mismatch', runningVersion: version };
+}
+
+// 强制杀掉守护进程（SIGTERM → 等待 → SIGKILL → 清理残留）
+async function killDaemon(): Promise<void> {
+  const pid = readDaemonPid();
+
+  // 1. 通过 PID 杀
+  if (pid !== null && isPidAlive(pid)) {
+    console.log(`[微信] 发送 SIGTERM → PID ${pid}`);
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+
+    // 等 1.5s，检查退出
+    for (let i = 0; i < 3; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (!isPidAlive(pid)) {
+        console.log(`[微信] PID ${pid} 已退出 (SIGTERM)`);
+        break;
+      }
+    }
+
+    // SIGKILL 兜底
+    if (isPidAlive(pid)) {
+      console.log(`[微信] SIGTERM 无效，发送 SIGKILL → PID ${pid}`);
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+      await new Promise(r => setTimeout(r, 1000));
+
+      if (isPidAlive(pid)) {
+        console.log(`[微信] ⚠️ PID ${pid} 无法杀死，需手动处理`);
+      }
+    }
+  }
+
+  // 2. 清理 PID 文件
+  try { unlinkSync(PID_FILE); } catch {}
+
+  // 3. 清理 socket 文件
+  try { unlinkSync(SOCKET_PATH); } catch {}
+
+  // 4. 等待端口释放
+  for (let i = 0; i < 10; i++) {
+    const used = await checkPortOccupied();
+    if (!used) {
+      console.log(`[微信] 端口 ${HTTP_PORT} 已释放`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  console.log(`[微信] ⚠️ 端口 ${HTTP_PORT} 仍被占用，跳过等待`);
+}
+
+async function startDaemon(): Promise<boolean> {
+  console.log(`[微信] 健康检查...`);
+  const health = await checkDaemonHealth();
+
+  switch (health.status) {
+    case 'healthy':
+      console.log(`[微信] 守护进程健康 (v${health.version})，跳过重启`);
+      return true;
+
+    case 'version_mismatch':
+      console.log(`[微信] 版本不匹配 (运行 v${health.runningVersion} → 当前 v${DAEMON_VERSION})，重启中...`);
+      await killDaemon();
+      break;
+
+    case 'unresponsive':
+      console.log(`[微信] 守护进程无响应: ${health.reason}`);
+      await killDaemon();
+      break;
+
+    case 'zombie':
+      console.log(`[微信] 僵尸进程: ${health.reason}`);
+      await killDaemon();
+      break;
+
+    case 'not_running':
+      console.log(`[微信] 守护进程未运行，启动中...`);
+      break;
+  }
+
+  // 起新进程
+  const { spawn } = await import('node:child_process');
+  const { mkdirSync, openSync } = await import('node:fs');
+
+  const daemonScript = join(EXTENSION_DIR, 'src', 'daemon.ts');
+  const logFile = join(MANAGER_DIR, 'daemon.log');
+  const logDir = MANAGER_DIR;
+
+  if (!existsSync(logDir)) {
+    mkdirSync(logDir, { recursive: true });
+  }
+
+  const logFd = openSync(logFile, 'a');
+  const tsxLoader = require.resolve('tsx');
+  const nodeBin = resolveNodeBinary();
+  const child = spawn(nodeBin, ['--import', tsxLoader, daemonScript], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    cwd: EXTENSION_DIR,
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  });
+
+  child.unref();
+  console.log(`[微信] 子进程已启动 (PID: ${child.pid})`);
+
+  // 等待 socket + HTTP 就绪（最多 10s）
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (existsSync(SOCKET_PATH)) {
+      // socket 出现后再等 500ms 确保 HTTP server 启动
+      await new Promise(r => setTimeout(r, 500));
+      console.log(`[微信] 守护进程启动成功`);
+      return true;
+    }
+  }
+
+  console.log(`[微信] 守护进程启动超时 (10s)`);
+  return false;
+}
+
+// 快速检查（用于自动重连）
+function isDaemonRunning(): boolean {
+  const pid = readDaemonPid();
+  if (pid === null) return false;
+  return isPidAlive(pid);
+}
+
+function resolveNodeBinary(): string {
+  if (existsSync(process.execPath)) return process.execPath;
+  try {
+    const nodePath = execSync('which node 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (nodePath && existsSync(nodePath)) return nodePath;
+  } catch {}
+  const candidates = ['/usr/local/bin/node', '/opt/homebrew/bin/node', '/usr/bin/node'];
+  for (const path of candidates) {
+    if (existsSync(path)) return path;
+  }
+  throw new Error('找不到可用的 Node.js');
 }
 
 // 自动重连：守护进程在就自动连上
@@ -238,11 +472,9 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
     socketClient = new SocketClient();
     await socketClient.connect(5000);
     
-    // 先设置事件处理，再注册（防止消息丢失）
     const defaultCtx = ctx || { cwd: process.cwd() } as Ctx;
     setupMessageHandler(socketClient, defaultCtx);
     
-    // 注册
     const result = await socketClient.request('register', {
       sessionId,
       pid: process.pid,
@@ -250,27 +482,22 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       name: sessionName || undefined,
     }) as any;
     
-    // 启动心跳
     heartbeatTimer = setInterval(async () => {
       try {
         await socketClient?.request('heartbeat', { sessionId });
       } catch {
         currentState = WechatState.IDLE;
         if (heartbeatTimer) clearInterval(heartbeatTimer);
-        // 尝试自动重连
         if (isDaemonRunning()) {
           try {
             const reconnected = await connectToDaemon(ctx);
-            if (reconnected) {
-              currentState = WechatState.DAEMON_CONNECTED;
-            }
+            if (reconnected) currentState = WechatState.DAEMON_CONNECTED;
           } catch {}
         }
         if (ctx) updateStatusBar(ctx);
       }
     }, 30000);
     
-    // 检查微信登录状态
     if (result.wechat?.loggedIn && result.wechat?.connected) {
       currentState = WechatState.WECHAT_CONNECTED;
     } else if (result.wechat?.loggedIn) {
@@ -279,7 +506,6 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       currentState = WechatState.DAEMON_CONNECTED;
     }
     
-    // 从守护进程加载当前 session 的别名（如果 pi --name 未被手动设置）
     if (!sessionName) {
       try {
         const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
@@ -293,7 +519,6 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       } catch {}
     }
     
-    // 更新状态到文件
     updateWechatStatus({
       loggedIn: result.wechat?.loggedIn || false,
       connected: result.wechat?.connected || false,
@@ -302,9 +527,7 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       userId: result.wechat?.userId,
     });
     
-    if (ctx) {
-      updateStatusBar(ctx);
-    }
+    if (ctx) updateStatusBar(ctx);
     return true;
   } catch (e) {
     socketClient = null;
@@ -319,100 +542,51 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
 function setupMessageHandler(client: SocketClient, ctx: Ctx) {
   client.on('wechat_message', (data) => {
     const { userId, text, images } = data;
-    
-    // 记录微信用户
     lastWechatUser = userId;
     wechatConversationActive = true;
     sentCount = 0;
     
-    // 构造消息内容
     const content: any[] = [];
-    if (text) {
-      // 添加来源标识
-      content.push({ type: 'text', text: `[微信消息] ${text}` });
-    }
+    if (text) content.push({ type: 'text', text: `[微信消息] ${text}` });
     if (images?.length) {
       for (const img of images) {
         try {
           const imageData = readFileSync(img);
           const ext = img.split('.').pop()?.toLowerCase() || 'png';
           const mime = ext === 'jpg' ? 'jpeg' : ext;
-          content.push({
-            type: 'image',
-            data: imageData.toString('base64'),
-            mimeType: `image/${mime}`,
-          });
-        } catch (e) {
-          console.error('读取图片失败:', e);
-        }
+          content.push({ type: 'image', data: imageData.toString('base64'), mimeType: `image/${mime}` });
+        } catch (e) { console.error('读取图片失败:', e); }
       }
     }
     
     if (content.length > 0 && globalPi) {
-      globalPi.sendUserMessage(content.length === 1 && content[0].type === 'text' 
-        ? content[0].text 
-        : content,
-        { deliverAs: 'followUp' }
-      );
+      globalPi.sendUserMessage(content.length === 1 && content[0].type === 'text' ? content[0].text : content, { deliverAs: 'followUp' });
     }
   });
   
-  // 处理来自微信的命令
   client.on('wechat_command', async (data) => {
     const { command, args, userId } = data;
     
     switch (command) {
       case 'help': {
         const helpText = [
-          '**📱 微信可用命令**',
-          '',
-          '**💬 消息**',
-          '直接发 → 发给默认 pi',
-          '@[唯一标识] 消息 → 发给指定 pi',
-          '',
-          '**📂 Session**',
-          '/new [唯一标识] [消息] → 新建 pi',
-          '/new /path [唯一标识] [消息] → 指定目录',
-          '/switch [唯一标识] → 切换默认 pi',
-          '/sessions → 列出所有 pi',
-          '',
-          '**🎛️ 控制**',
-          '/stop [唯一标识] → 中断操作',
-          '/kill [唯一标识] → 终止进程',
-          '/progress [唯一标识] → 查看进度',
-          '',
-          '**🤖 AI**',
-          '/model [模型名] → 列出/切换模型',
-          '/context → 查询上下文用量',
-          '/compact → 压缩上下文',
-          '',
-          '**🏷️ 别名**',
-          '/alias → 列出别名',
-          '/alias [名字] → 给当前 pi 起名',
-          '',
-          '**⏰ 定时**',
-          '/cron → 查看定时任务',
-          '/cron remove [名字] → 删除',
-          '',
-          '**📊 其他**',
-          '/status → 连接状态',
+          '**📱 微信可用命令**', '',
+          '**💬 消息**', '直接发 → 发给默认 pi', '@[唯一标识] 消息 → 发给指定 pi', '',
+          '**📂 Session**', '/new [唯一标识] [消息] → 新建 pi', '/new /path [唯一标识] [消息] → 指定目录', '/switch [唯一标识] → 切换默认 pi', '/sessions → 列出所有 pi', '',
+          '**🎛️ 控制**', '/stop [唯一标识] → 中断操作', '/kill [唯一标识] → 终止进程', '/progress [唯一标识] → 查看进度', '',
+          '**🤖 AI**', '/model [模型名] → 列出/切换模型', '/context → 查询上下文用量', '/compact → 压缩上下文', '',
+          '**🏷️ 别名**', '/alias → 列出别名', '/alias [名字] → 给当前 pi 起名', '',
+          '**⏰ 定时**', '/cron → 查看定时任务', '/cron remove [名字] → 删除', '',
+          '**📊 其他**', '/status → 连接状态',
         ].join('\n');
-        
-        // 直接通过守护进程发送到微信
-        if (socketClient) {
-          await socketClient.request('send_to_wechat', { userId, text: helpText });
-        }
+        if (socketClient) await socketClient.request('send_to_wechat', { userId, text: helpText });
         break;
       }
       
       case 'status': {
         if (socketClient) {
           const status = await socketClient.request('get_status', {});
-          const statusText = [
-            '📊 状态：',
-            `微信：${status.wechat?.connected ? '已连接' : '未连接'}`,
-            `Session：${sessionId.slice(0, 8)}...`,
-          ].join('\n');
+          const statusText = ['📊 状态：', `微信：${status.wechat?.connected ? '已连接' : '未连接'}`, `Session：${sessionId.slice(0, 8)}...`].join('\n');
           await socketClient.request('send_to_wechat', { userId, text: statusText });
         }
         break;
@@ -426,10 +600,7 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
             const active = s.isActive ? '🟢' : '⚪';
             return `${active} ${name}`;
           }).join('\n');
-          await socketClient.request('send_to_wechat', { 
-            userId, 
-            text: `📋 Sessions：\n${sessionList}` 
-          });
+          await socketClient.request('send_to_wechat', { userId, text: `📋 Sessions：\n${sessionList}` });
         }
         break;
       }
@@ -438,40 +609,22 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
         if (socketClient) {
           const [name, targetSession] = args.split(/\s+/);
           if (!name) {
-            // 列出别名
             const aliases = await socketClient.request('get_aliases', {});
             const aliasList = Object.entries(aliases).map(([k, v]) => `@${k} → ${(v as string).slice(0, 8)}...`).join('\n');
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: aliasList ? `📋 别名：\n${aliasList}` : '没有设置别名' 
-            });
+            await socketClient.request('send_to_wechat', { userId, text: aliasList ? `📋 别名：\n${aliasList}` : '没有设置别名' });
           } else if (!targetSession) {
-            // 设置当前 session 别名
             const result = await socketClient.request('set_alias', { name, sessionId }) as any;
             if (result.updated) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${sessionId.slice(0, 8)}` 
-              });
+              await socketClient.request('send_to_wechat', { userId, text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${sessionId.slice(0, 8)}` });
             } else {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `✅ 已设置别名：@${name} → ${sessionId.slice(0, 8)}...` 
-              });
+              await socketClient.request('send_to_wechat', { userId, text: `✅ 已设置别名：@${name} → ${sessionId.slice(0, 8)}...` });
             }
           } else {
-            // 设置指定 session 别名
             const result = await socketClient.request('set_alias', { name, sessionId: targetSession }) as any;
             if (result.updated) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}` 
-              });
+              await socketClient.request('send_to_wechat', { userId, text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}` });
             } else {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `✅ 已设置别名：@${name} → ${targetSession.slice(0, 8)}...` 
-              });
+              await socketClient.request('send_to_wechat', { userId, text: `✅ 已设置别名：@${name} → ${targetSession.slice(0, 8)}...` });
             }
           }
         }
@@ -479,86 +632,51 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       }
       
       case 'stop': {
-        // 中断当前 agent
-        if (ctx) {
-          if (!ctx.isIdle()) {
-            ctx.abort();
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { userId, text: '⏹️ 已中断' });
-            }
-          } else {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { userId, text: '⏹️ 当前无运行任务' });
-            }
-          }
+        if (ctx && !ctx.isIdle()) {
+          ctx.abort();
+          if (socketClient) await socketClient.request('send_to_wechat', { userId, text: '⏹️ 已中断' });
+        } else if (socketClient) {
+          await socketClient.request('send_to_wechat', { userId, text: '⏹️ 当前无运行任务' });
         }
         break;
       }
       
       case 'reset':
       case 'compact': {
-        // 压缩上下文
         if (ctx && socketClient) {
           const sc = socketClient;
           await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
           ctx.compact({
-            onComplete: () => {
-              sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
-            },
-            onError: (e: any) => {
-              sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
-            },
+            onComplete: () => { sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {}); },
+            onError: (e: any) => { sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {}); },
           });
         }
         break;
       }
       
       case 'context': {
-        // /context 或 /context <别名>
         const alias = args?.alias;
-        
         if (alias && alias !== 'undefined') {
-          // /context <别名> → 暂不支持跨 session 查询
-          if (socketClient) {
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: '⚠️ /context <别名> 暂不支持跨 session，请用 @别名 切换' 
-            });
-          }
+          if (socketClient) await socketClient.request('send_to_wechat', { userId, text: '⚠️ /context <别名> 暂不支持跨 session，请用 @别名 切换' });
         } else if (ctx) {
           try {
             const usage = ctx.getContextUsage();
             if (usage && usage.tokens > 0) {
               const percent = usage.percent !== undefined ? Math.round(usage.percent) : '?';
-              let text = `**📊 上下文用量**\n\n`;
-              text += `- Tokens: ${usage.tokens.toLocaleString()}\n`;
+              let text = `**📊 上下文用量**\n\n- Tokens: ${usage.tokens.toLocaleString()}\n`;
               if (usage.percent !== undefined) {
                 text += `- 使用率: ${percent}%\n`;
                 const bar = '█'.repeat(Math.min(Math.round(usage.percent / 5), 20));
                 const empty = '░'.repeat(20 - bar.length);
                 text += `- [${bar}${empty}]\n`;
               }
-              if (usage.percent !== undefined && usage.percent > 70) {
-                text += '\n⚠️ 建议 /compact';
-              }
-              if (socketClient) {
-                await socketClient.request('send_to_wechat', { userId, text });
-              }
-            } else {
-              if (socketClient) {
-                await socketClient.request('send_to_wechat', { 
-                  userId, 
-                  text: '📊 暂无上下文数据' 
-                });
-              }
+              if (usage.percent !== undefined && usage.percent > 70) text += '\n⚠️ 建议 /compact';
+              if (socketClient) await socketClient.request('send_to_wechat', { userId, text });
+            } else if (socketClient) {
+              await socketClient.request('send_to_wechat', { userId, text: '📊 暂无上下文数据' });
             }
           } catch (e: any) {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `❌ 查询失败: ${e.message}` 
-              });
-            }
+            if (socketClient) await socketClient.request('send_to_wechat', { userId, text: `❌ 查询失败: ${e.message}` });
           }
         }
         break;
@@ -566,13 +684,10 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       
       case 'model': {
         const modelName = args?.modelName;
-        
         if (!modelName) {
-          // /model → 显示可用模型
           try {
             if (ctx && ctx.modelRegistry) {
               let listText = '**🤖 可用模型：**\n\n';
-              // 从 models-store.json 遍历（ctx.modelRegistry 只暴露 provider-level API）
               const { readFileSync, existsSync } = await import('node:fs');
               const { homedir } = await import('node:os');
               const { join } = await import('node:path');
@@ -581,31 +696,19 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
                 const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
                 const allModels: string[] = [];
                 for (const [provider, data] of Object.entries(store) as any) {
-                  for (const m of (data as any).models || []) {
-                    allModels.push(`- ${m.id}`);
-                  }
+                  for (const m of (data as any).models || []) allModels.push(`- ${m.id}`);
                 }
-                listText += allModels.slice(0, 20).join('\n');
-                listText += '\n\n输入 /model <名称> 切换';
+                listText += allModels.slice(0, 20).join('\n') + '\n\n输入 /model <名称> 切换';
               } else {
                 listText += '（未找到模型配置）';
               }
-              if (socketClient) {
-                await socketClient.request('send_to_wechat', { userId, text: listText });
-              }
+              if (socketClient) await socketClient.request('send_to_wechat', { userId, text: listText });
             }
           } catch (e: any) {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `❌ 读取模型失败: ${e.message}` 
-              });
-            }
+            if (socketClient) await socketClient.request('send_to_wechat', { userId, text: `❌ 读取模型失败: ${e.message}` });
           }
         } else if (globalPi && ctx) {
-          // /model <name> → 用 pi.setModel() 直接切换
           try {
-            // 从 models-store.json 找到 provider
             const { readFileSync, existsSync } = await import('node:fs');
             const { homedir } = await import('node:os');
             const { join } = await import('node:path');
@@ -615,41 +718,24 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
               const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
               for (const [pid, data] of Object.entries(store) as any) {
                 for (const m of (data as any).models || []) {
-                  if (m.id === modelName) {
-                    provider = pid;
-                    break;
-                  }
+                  if (m.id === modelName) { provider = pid; break; }
                 }
                 if (provider) break;
               }
             }
             if (!provider) {
-              if (socketClient) {
-                await socketClient.request('send_to_wechat', { userId, text: `❌ 未找到模型: ${modelName}` });
-              }
+              if (socketClient) await socketClient.request('send_to_wechat', { userId, text: `❌ 未找到模型: ${modelName}` });
               break;
             }
             const model = ctx.modelRegistry.find(provider, modelName);
             if (!model) {
-              if (socketClient) {
-                await socketClient.request('send_to_wechat', { userId, text: `❌ 无法加载模型: ${modelName}` });
-              }
+              if (socketClient) await socketClient.request('send_to_wechat', { userId, text: `❌ 无法加载模型: ${modelName}` });
               break;
             }
             const success = await globalPi.setModel(model);
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: success ? `✅ 已切换到 ${modelName}` : `❌ 切换失败（可能缺少 API key）` 
-              });
-            }
+            if (socketClient) await socketClient.request('send_to_wechat', { userId, text: success ? `✅ 已切换到 ${modelName}` : `❌ 切换失败（可能缺少 API key）` });
           } catch (e: any) {
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { 
-                userId, 
-                text: `❌ 切换失败: ${e.message}` 
-              });
-            }
+            if (socketClient) await socketClient.request('send_to_wechat', { userId, text: `❌ 切换失败: ${e.message}` });
           }
         }
         break;
@@ -677,214 +763,69 @@ function generateQrText(url: string): Promise<string> {
 }
 
 async function startLoginFlow(ctx: ExtensionCommandContext): Promise<boolean> {
-  // 取消之前的登录
   cancelLogin(ctx);
-  
   loginAbortController = new AbortController();
   const signal = loginAbortController.signal;
   
   let qr: { url: string; token: string };
-  
   try {
     ctx.ui.notify('正在获取二维码...', 'info');
     qr = await getQrCode();
-    
-    if (!qr || !qr.url) {
-      ctx.ui.notify('获取二维码失败', 'error');
-      return false;
-    }
+    if (!qr || !qr.url) { ctx.ui.notify('获取二维码失败', 'error'); return false; }
   } catch (e: any) {
     ctx.ui.notify(`获取二维码失败：${e.message}`, 'error');
     return false;
   }
   
-  // 生成并显示二维码
   const qrText = await generateQrText(qr.url);
   ctx.ui.notify(`请用微信扫码登录：\n\n${qrText}\n\n二维码链接：${qr.url}`, 'info');
   
-  // 轮询等待确认
   let currentBaseUrl: string | undefined;
   let lastStatus = '';
   let refreshCount = 0;
   
   for (let i = 0; i < 90; i++) {
     if (signal.aborted) return false;
-    
     await new Promise(r => setTimeout(r, 2000));
-    
     if (signal.aborted) return false;
     
     try {
       const result = await pollQrStatus(qr.token, currentBaseUrl);
-      
-      if (result.redirectHost) {
-        currentBaseUrl = `https://${result.redirectHost}`;
-      }
+      if (result.redirectHost) currentBaseUrl = `https://${result.redirectHost}`;
       
       if (result.status !== lastStatus) {
         lastStatus = result.status;
-        if (result.status === 'scaned') {
-          ctx.ui.notify('已扫码，请在手机上确认登录', 'info');
-        }
+        if (result.status === 'scaned') ctx.ui.notify('已扫码，请在手机上确认登录', 'info');
       }
       
       if (result.status === 'confirmed' && result.credentials) {
         await saveCredentials(result.credentials);
         ctx.ui.notify('微信登录成功 ✅', 'info');
-        
-        // 更新状态
         currentState = WechatState.WECHAT_CONNECTED;
         updateStatusBar(ctx);
-        
-        // 通知守护进程
         if (socketClient) {
-          try {
-            await socketClient.request('wechat_login_success', { credentials: result.credentials });
-          } catch {}
+          try { await socketClient.request('wechat_login_success', { credentials: result.credentials }); } catch {}
         }
-        
         return true;
       }
       
       if (result.status === 'expired') {
         refreshCount++;
-        if (refreshCount >= 3) {
-          ctx.ui.notify('二维码多次过期，请重新执行 /wechat start', 'error');
-          return false;
-        }
-        
+        if (refreshCount >= 3) { ctx.ui.notify('二维码多次过期，请重新执行 /wechat start', 'error'); return false; }
         ctx.ui.notify('二维码已过期，正在刷新...', 'info');
         try {
           qr = await getQrCode(currentBaseUrl);
           const newQrText = await generateQrText(qr.url);
           ctx.ui.notify(`请重新扫码：\n\n${newQrText}\n\n二维码链接：${qr.url}`, 'info');
           lastStatus = '';
-        } catch (e: any) {
-          ctx.ui.notify(`刷新失败：${e.message}`, 'error');
-        }
+        } catch (e: any) { ctx.ui.notify(`刷新失败：${e.message}`, 'error'); }
       }
-    } catch (e: any) {
-      console.error('轮询失败:', e.message);
-    }
+    } catch (e: any) { console.error('轮询失败:', e.message); }
   }
   
   ctx.ui.notify('登录超时，请重新执行 /wechat start', 'error');
   return false;
 }
-
-// ============================================================================
-// 启动守护进程
-// ============================================================================
-
-function resolveNodeBinary(): string {
-  // 1. 尝试当前进程的 node（最可靠）
-  if (existsSync(process.execPath)) return process.execPath;
-  
-  // 2. 尝试 PATH 中的 node
-  try {
-    const nodePath = execSync('which node 2>/dev/null', { encoding: 'utf-8' }).trim();
-    if (nodePath && existsSync(nodePath)) return nodePath;
-  } catch {}
-  
-  // 3. 尝试常见路径
-  const candidates = [
-    '/usr/local/bin/node',
-    '/opt/homebrew/bin/node',
-    '/usr/bin/node',
-  ];
-  for (const path of candidates) {
-    if (existsSync(path)) return path;
-  }
-  
-  throw new Error('找不到可用的 Node.js，请安装 Node.js ≥ 18');
-}
-
-async function startDaemon(): Promise<boolean> {
-  // 如果守护进程已在运行，检查版本
-  if (isDaemonRunning()) {
-    try {
-      const http = await import('node:http');
-      const version = await new Promise<string>((resolve, reject) => {
-        const req = http.get(`http://localhost:${HTTP_PORT}/api/version`, { timeout: 2000 }, (res) => {
-          let data = '';
-          res.on('data', (chunk: string) => data += chunk);
-          res.on('end', () => {
-            try {
-              const json = JSON.parse(data);
-              resolve(json.version || '');
-            } catch { resolve(''); }
-          });
-        });
-        req.on('error', () => resolve(''));
-        req.on('timeout', () => { req.destroy(); resolve(''); });
-      });
-      
-      if (version === DAEMON_VERSION) {
-        console.log(`[微信] 守护进程版本匹配 (v${DAEMON_VERSION})，无需重启`);
-        return true;
-      }
-      
-      // 版本不匹配，杀掉旧守护进程
-      console.log(`[微信] 守护进程版本不匹配 (运行: v${version}, 当前: v${DAEMON_VERSION})，重启中...`);
-      killDaemon();
-      // 等待进程退出 + 端口释放
-      await new Promise(r => setTimeout(r, 1500));
-    } catch {
-      // HTTP 请求失败，可能是旧版没有 /api/version，杀掉重启
-      console.log(`[微信] 旧版守护进程（无版本接口），重启中...`);
-      killDaemon();
-      await new Promise(r => setTimeout(r, 1500));
-    }
-  }
-  
-  const { spawn } = await import('node:child_process');
-  const { mkdirSync, openSync } = await import('node:fs');
-  
-  const daemonScript = join(EXTENSION_DIR, 'src', 'daemon.ts');
-  const logFile = join(MANAGER_DIR, 'daemon.log');
-  const logDir = MANAGER_DIR;
-  
-  if (!existsSync(logDir)) {
-    mkdirSync(logDir, { recursive: true });
-  }
-  
-  const logFd = openSync(logFile, 'a');
-  const tsxLoader = require.resolve('tsx');
-  const nodeBin = resolveNodeBinary();
-  const child = spawn(nodeBin, ['--import', tsxLoader, daemonScript], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    cwd: EXTENSION_DIR,
-    env: { ...process.env, NODE_NO_WARNINGS: '1' },
-  });
-  
-  child.unref();
-  
-  // 等待启动
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    if (existsSync(SOCKET_PATH)) return true;
-  }
-  
-  return false;
-}
-
-// 杀掉旧守护进程
-function killDaemon(): void {
-  if (existsSync(PID_FILE)) {
-    try {
-      const pid = parseInt(readFileSync(PID_FILE, 'utf-8'));
-      process.kill(pid, 'SIGTERM');
-      console.log(`[微信] 已发送 SIGTERM 到旧守护进程 (PID: ${pid})`);
-    } catch {}
-  }
-  // 清理 socket 文件
-  try { unlinkSync(SOCKET_PATH); } catch {}
-}
-
-// ============================================================================
-// 全局 pi 实例
-// ============================================================================
 
 let globalPi: ExtensionAPI | null = null;
 
