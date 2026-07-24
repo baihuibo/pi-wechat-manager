@@ -202,6 +202,8 @@ export class WechatBridge {
     const conn = this.state.connections.get(targetSessionId);
     if (conn?.socket.writable) {
       console.log(`[微信] 推送消息到 pi session: ${targetSessionId}`);
+      // 记录最近任务（用于 /progress）
+      this.state.setLastTask(targetSessionId, messageText.slice(0, 200));
       this.state.sendToSession(targetSessionId, 'wechat_message', messageData);
     } else {
       console.log(`[微信] pi session 未连接，尝试自动启动 pi...`);
@@ -213,6 +215,7 @@ export class WechatBridge {
       const spawned = await this.spawnPiSession(targetSessionId);
       
       // 入队消息（包含 userId，用于后续回复）
+      this.state.setLastTask(targetSessionId, message.text?.slice(0, 200) || '');
       this.state.enqueueMessage(targetSessionId, {
         id: `msg_${Date.now()}`,
         sessionId: targetSessionId,
@@ -642,7 +645,7 @@ export class WechatBridge {
           break;
         }
         
-        const sessionName = targetSessionId.slice(0, 8);
+        const sessionShort = targetSessionId.slice(0, 8);
         const isDefault = targetSessionId === this.state.defaultSessionId;
         const progress = this.state.getProgress(targetSessionId);
         
@@ -654,37 +657,38 @@ export class WechatBridge {
           `${Math.floor(timeSinceLastActive / 3600000)} 小时前`;
         
         // 判断状态
-        let statusEmoji = '🟢';
-        let statusText = '运行中';
-        if (timeSinceLastActive > 300000) { // 5 分钟
-          statusEmoji = '⚠️';
-          statusText = '可能卡死';
-        } else if (timeSinceLastActive > 60000) { // 1 分钟
-          statusEmoji = '⏸️';
-          statusText = '可能暂停';
+        const idle = timeSinceLastActive > 120000; // 2分钟
+        
+        let progressText = `**📊 @${sessionShort}**\n\n`;
+        
+        // 最近任务
+        if (progress.lastTask) {
+          const taskPreview = progress.lastTask.length > 80 
+            ? progress.lastTask.slice(0, 80) + '...'
+            : progress.lastTask;
+          progressText += `- 最近任务：${taskPreview}\n`;
         }
         
-        let progressText = `**📊 @${sessionName}：**\n\n`;
-        progressText += `- 状态：${statusEmoji} ${statusText}\n`;
-        
-        if (progress.startTime) {
-          const runtime = Math.floor((Date.now() - progress.startTime) / 1000);
-          const runtimeText = runtime > 60 ? `${Math.floor(runtime / 60)} 分钟` : `${runtime} 秒`;
-          progressText += `- 已运行：${runtimeText}\n`;
+        if (idle) {
+          progressText += `- 状态：⚪ 空闲\n`;
+          progressText += `- 最后活跃：${lastActiveText}\n`;
+        } else {
+          progressText += `- 状态：🟢 运行中\n`;
+          if (progress.startTime) {
+            const runtime = Math.floor((Date.now() - progress.startTime) / 1000);
+            const runtimeText = runtime > 60 ? `${Math.floor(runtime / 60)} 分钟` : `${runtime} 秒`;
+            progressText += `- 已运行：${runtimeText}\n`;
+          }
         }
         
-        progressText += `- 最后活跃：${lastActiveText}\n`;
+        // 进度消息
+        if (progress.messages.length > 0) {
+          const latest = progress.messages[progress.messages.length - 1];
+          progressText += `- 最新进度：${latest}\n`;
+        }
         
         if (isDefault) {
-          progressText += `- 标记：⭐ 默认 session\n`;
-        }
-        
-        // 显示进度消息历史
-        if (progress.messages.length > 0) {
-          progressText += `\n**进度历史：**\n`;
-          progress.messages.forEach((msg, i) => {
-            progressText += `${i + 1}. ${msg}\n`;
-          });
+          progressText += `- 标记：⭐ 默认\n`;
         }
         
         await this.sendText(userId, progressText);

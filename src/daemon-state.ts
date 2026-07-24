@@ -14,6 +14,7 @@ export interface Connection {
   connectedAt: Date;
   taskStartTime?: number;      // 任务开始时间
   progressMessages: string[];  // 进度消息历史
+  lastTask?: string;           // 最近一次任务描述（用户消息）
 }
 
 // 微信状态
@@ -151,7 +152,7 @@ export class DaemonState {
   }
   
   // 获取进度信息
-  getProgress(sessionId: string): { startTime?: number; messages: string[] } {
+  getProgress(sessionId: string): { startTime?: number; messages: string[]; lastTask?: string } {
     const conn = this.connections.get(sessionId);
     if (!conn) {
       return { messages: [] };
@@ -159,7 +160,14 @@ export class DaemonState {
     return {
       startTime: conn.taskStartTime,
       messages: [...conn.progressMessages],
+      lastTask: conn.lastTask,
     };
+  }
+
+  // 设置最近任务
+  setLastTask(sessionId: string, task: string): void {
+    const conn = this.connections.get(sessionId);
+    if (conn) conn.lastTask = task;
   }
   
   // 清除任务进度
