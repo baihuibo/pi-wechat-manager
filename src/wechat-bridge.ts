@@ -425,8 +425,11 @@ export class WechatBridge {
           for (const id of activeSessions) {
             const isDefault = id === defaultSession;
             const marker = isDefault ? '→' : ' ';
+            const conn = this.state.connections.get(id);
             const alias = sessionToAlias.get(id);
-            const displayName = alias ? `@${alias}` : `${id.slice(0, 8)}...`;
+            const displayName = (alias || conn?.name)
+              ? `@${alias || conn?.name}`
+              : `${id.slice(0, 8)}...`;
             statusText += `${marker} ${displayName}${isDefault ? ' (默认)' : ''}\n`;
           }
         }
@@ -505,11 +508,11 @@ export class WechatBridge {
           const summary = getSummary(s);
           const time = fmtTime(s.modified);
 
-          // 优先显示别名，其次 pi --name，最后 short ID
+          // 别名 或 pi --name 都显示为 @名称；否则显示 short ID
           const alias = sessionToAlias.get(s.id);
-          const displayName = alias
-            ? `@${alias}`
-            : (s.name || s.id.slice(0, 8));
+          const displayName = (alias || s.name)
+            ? `@${alias || s.name}`
+            : s.id.slice(0, 8);
 
           return `- ${status} ${displayName}  ${summary}  ${time}`;
         });

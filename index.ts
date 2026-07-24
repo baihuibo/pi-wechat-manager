@@ -463,6 +463,51 @@ function updateStatusBar(ctx: ExtensionContext) {
   }
 }
 
+// 同步 session 名称（延迟读文件 → 注册别名 → 更新状态栏）
+async function syncSessionName(ctx?: Ctx): Promise<void> {
+  if (sessionName) return; // 已有名称，不需要同步
+  
+  // 最多重试 10 次，每次间隔 500ms（5s 总超时）
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    
+    try {
+      const { getSession } = await import('./src/session-discover.js');
+      const sessionInfo = getSession(sessionId);
+      if (sessionInfo?.name) {
+        sessionName = sessionInfo.name;
+        console.log(`[微信] 检测到 pi 名称: ${sessionName}`);
+        
+        // 同步到守护进程别名表
+        if (socketClient?.connected) {
+          try {
+            await socketClient.request('set_alias', { name: sessionName, sessionId });
+          } catch {}
+        }
+        
+        // 更新状态栏
+        if (ctx) updateStatusBar(ctx as ExtensionContext);
+        return;
+      }
+    } catch {}
+  }
+  
+  // 如果文件里没有 name，尝试从守护进程别名表反向加载
+  if (!sessionName && socketClient?.connected) {
+    try {
+      const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
+      for (const [alias, sid] of Object.entries(aliases)) {
+        if (sid === sessionId) {
+          sessionName = alias;
+          console.log(`[微信] 从别名表加载名称: ${sessionName}`);
+          if (ctx) updateStatusBar(ctx as ExtensionContext);
+          break;
+        }
+      }
+    } catch {}
+  }
+}
+
 // ============================================================================
 // 连接守护进程
 // ============================================================================
@@ -840,16 +885,6 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     
-    // 读取 pi --name（从 session 文件读取 session_info）
-    try {
-      const { getSession } = await import('./src/session-discover.js');
-      const sessionInfo = getSession(sessionId);
-      if (sessionInfo?.name) {
-        sessionName = sessionInfo.name;
-        console.log(`[微信] 检测到 pi 名称: ${sessionName}`);
-      }
-    } catch {}
-    
     // 静默连接（守护进程不在就跳过，不报错）
     if (isDaemonRunning()) {
       const connected = await connectToDaemon(ctx);
@@ -857,6 +892,10 @@ export default function wechatManager(pi: ExtensionAPI) {
         currentState = WechatState.IDLE;
       }
     }
+    
+    // 延迟读取 pi --name（session 文件可能还没写完）
+    // 同时确保别名同步到守护进程
+    syncSessionName(ctx);
   });
   
   // ===== /wechat 命令 =====
