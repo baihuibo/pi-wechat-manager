@@ -419,15 +419,11 @@ export class WechatBridge {
 
           // 别名：只在有别于 name/ID 时显示
           const alias = sessionToAlias.get(s.id);
-          const aliasLine = (alias && alias !== displayName && alias !== s.id)
-            ? `   @${alias}`
+          const aliasTag = (alias && alias !== displayName && alias !== s.id)
+            ? `  @${alias}`
             : '';
 
-          let line = `${status} ${displayName}`;
-          if (summary) line += `  ${summary}`;
-          line += `  ${time}`;
-          if (aliasLine) line += `\n${aliasLine}`;
-          return line;
+          return `- ${status} ${displayName}${aliasTag}  ${summary}  ${time}`;
         });
 
         await this.sendText(userId, `${header}\n\n${lines.join('\n')}\n\n💡 使用 /switch <id> 切换 session`);
