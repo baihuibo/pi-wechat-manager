@@ -159,6 +159,14 @@ export class WechatBridge {
       return;
     }
     
+    // @别名 指定了目标但找不到 → 提示用户，不 fallback
+    if (targetSessionId === '__not_found__') {
+      const mentionedName = message.text?.match(/^@(\S+)/)?.[1] || '';
+      console.log(`[微信] @${mentionedName} 未找到匹配的 pi`);
+      this.sendText(message.userId, `❌ 未找到 @${mentionedName} 对应的 pi\n\n使用 /sessions 查看可用列表，或 /alias 设置别名`).catch(() => {});
+      return;
+    }
+    
     if (!targetSessionId) {
       console.log('[微信] 无法路由消息，没有可用的 session');
       this.sendText(message.userId, '❌ 没有可用的 pi session，请先启动 pi').catch(() => {});
@@ -384,20 +392,32 @@ export class WechatBridge {
       case 'status': {
         const status = this.getStatus();
         
+        // 获取别名映射
+        const aliases = await this.getAliases();
+        const sessionToAlias = new Map<string, string>();
+        for (const [alias, sessionId] of Object.entries(aliases)) {
+          sessionToAlias.set(sessionId, alias);
+        }
+        
         // 获取活跃 session 列表
         const activeSessions = Array.from(this.state.connections.entries())
           .filter(([_, conn]) => conn.socket.writable)
           .map(([id, _]) => id);
         
         const defaultSession = this.state.defaultSessionId;
-        const defaultSessionName = defaultSession ? (defaultSession.slice(0, 8) + '...') : '无';
+        const defaultAlias = defaultSession ? sessionToAlias.get(defaultSession) : null;
+        const defaultDisplayName = defaultAlias
+          ? `@${defaultAlias}`
+          : defaultSession
+            ? defaultSession.slice(0, 8) + '...'
+            : '无';
         
         // 获取定时任务列表
         const cronTasks = this.state.getCronTasks();
         
         let statusText = `**📊 微信桥接**\n\n`;
         statusText += `- 微信：${status.connected ? '✅ 已连接' : '❌ 未连接'}\n`;
-        statusText += `- 当前：${defaultSessionName}\n`;
+        statusText += `- 当前：${defaultDisplayName}\n`;
         statusText += `- 活跃 pi：${activeSessions.length} 个\n`;
         
         if (activeSessions.length > 0) {
@@ -405,7 +425,9 @@ export class WechatBridge {
           for (const id of activeSessions) {
             const isDefault = id === defaultSession;
             const marker = isDefault ? '→' : ' ';
-            statusText += `${marker} ${id.slice(0, 8)}...${isDefault ? ' (默认)' : ''}\n`;
+            const alias = sessionToAlias.get(id);
+            const displayName = alias ? `@${alias}` : `${id.slice(0, 8)}...`;
+            statusText += `${marker} ${displayName}${isDefault ? ' (默认)' : ''}\n`;
           }
         }
         
@@ -916,20 +938,10 @@ export class WechatBridge {
     }
   }
   
-  // 获取别名（从 session 文件中读取）
+  // 获取别名（从 aliases.json 读取，与 daemon 的 loadAliases 保持一致）
   private async getAliases(): Promise<Record<string, string>> {
-    const { listSessions } = await import('./session-discover.js');
-    const sessions = listSessions();
-    
-    // 从 session 文件中读取 name，构建别名映射
-    const aliases: Record<string, string> = {};
-    for (const session of sessions) {
-      if (session.name) {
-        aliases[session.name] = session.id;
-      }
-    }
-    
-    return aliases;
+    const { loadAliases } = await import('./config.js');
+    return loadAliases();
   }
   
   // 根据 ID 或短 ID 查找 session
@@ -964,6 +976,8 @@ export class WechatBridge {
   }
   
   // 路由消息到正确的 session
+  // 返回 null 表示找不到目标（@mention 明确指定了目标但不存在）
+  // 返回 '__not_found__' 表示 @别名 不存在，不要 fallback
   private async routeMessage(message: IncomingMessage): Promise<string | null> {
     const text = message.text?.trim() || '';
     
@@ -994,6 +1008,10 @@ export class WechatBridge {
           console.log(`[微信] @${target} 正在 /new 创建中，拒绝消息`);
           return '__pending__';
         }
+        
+        // @mention 明确指定了目标但找不到 → 不 fallback，直接返回未找到
+        console.log(`[微信] @${target} 未找到匹配的别名或 session`);
+        return '__not_found__';
       }
     }
     
