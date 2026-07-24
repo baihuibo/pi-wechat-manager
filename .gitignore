@@ -19,3 +19,4 @@ stop-daemon.sh
 test.sh
 templates/
 tsconfig.json
+.history
