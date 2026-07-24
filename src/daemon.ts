@@ -49,10 +49,22 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
   
   switch (method) {
     case 'register': {
-      const { sessionId, pid, cwd } = params;
+      const { sessionId, pid, cwd, name } = params;
       const isNew = !state.sessionRegistry.has(sessionId);
       
-      state.register(sessionId, pid, cwd, socket);
+      state.register(sessionId, pid, cwd, socket, name);
+      
+      // 如果 pi 有 --name，自动注册为别名
+      if (name && typeof name === 'string' && name.trim()) {
+        const aliases = loadAliases();
+        const existing = aliases[name];
+        if (existing && existing !== sessionId) {
+          console.log(`[别名] ${name} 之前指向 ${existing.slice(0,8)}，已更新为 ${sessionId.slice(0,8)}`);
+        }
+        aliases[name] = sessionId;
+        saveAliases(aliases);
+        console.log(`[别名] 自动注册: @${name} → ${sessionId.slice(0,8)}`);
+      }
 
       // 清除启动追踪（启动成功了）
       if (state.startupTracker.has(sessionId)) {
@@ -322,9 +334,15 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
     
     case 'set_alias': {
       const aliases = loadAliases();
+      const existing = aliases[params.name];
       aliases[params.name] = params.sessionId;
       saveAliases(aliases);
-      respond({ ok: true });
+      if (existing && existing !== params.sessionId) {
+        console.log(`[别名] ${params.name} 之前指向 ${existing.slice(0,8)}，已更新为 ${params.sessionId.slice(0,8)}`);
+        respond({ ok: true, updated: true, previousSession: existing });
+      } else {
+        respond({ ok: true });
+      }
       break;
     }
     

@@ -9,6 +9,7 @@ export interface Connection {
   sessionId: string;
   pid: number;
   cwd: string;
+  name?: string;               // pi --name 指定的名字
   socket: Socket;
   lastHeartbeat: Date;
   connectedAt: Date;
@@ -100,11 +101,12 @@ export class DaemonState {
   cronTasks: Map<string, CronTask> = new Map();
   
   // 注册连接
-  register(sessionId: string, pid: number, cwd: string, socket: Socket): void {
+  register(sessionId: string, pid: number, cwd: string, socket: Socket, name?: string): void {
     this.connections.set(sessionId, {
       sessionId,
       pid,
       cwd,
+      name,
       socket,
       lastHeartbeat: new Date(),
       connectedAt: new Date(),
@@ -287,6 +289,7 @@ export class DaemonState {
         sessionId: c.sessionId,
         pid: c.pid,
         cwd: c.cwd,
+        name: c.name,
         lastHeartbeat: c.lastHeartbeat.toISOString(),
         connectedAt: c.connectedAt.toISOString(),
       })),

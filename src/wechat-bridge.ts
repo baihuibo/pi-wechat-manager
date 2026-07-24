@@ -502,17 +502,16 @@ export class WechatBridge {
         const lines = sorted.slice(0, displayCount).map((s: any) => {
           const isActive = this.state.connections.has(s.id);
           const status = isActive ? '🟢' : '⚪';
-          const displayName = s.name || s.id.slice(0, 8);
           const summary = getSummary(s);
           const time = fmtTime(s.modified);
 
-          // 别名：只在有别于 name/ID 时显示
+          // 优先显示别名，其次 pi --name，最后 short ID
           const alias = sessionToAlias.get(s.id);
-          const aliasTag = (alias && alias !== displayName && alias !== s.id)
-            ? `  @${alias}`
-            : '';
+          const displayName = alias
+            ? `@${alias}`
+            : (s.name || s.id.slice(0, 8));
 
-          return `- ${status} ${displayName}${aliasTag}  ${summary}  ${time}`;
+          return `- ${status} ${displayName}  ${summary}  ${time}`;
         });
 
         await this.sendText(userId, `${header}\n\n${lines.join('\n')}\n\n💡 使用 /switch <id> 切换 session`);
@@ -536,8 +535,12 @@ export class WechatBridge {
           if (!currentSession) {
             await this.sendText(userId, '❌ 没有当前 session，请先启动 pi');
           } else {
-            await this.setAlias(name, currentSession);
-            await this.sendText(userId, `✅ 已设置别名：@${name} → ${currentSession.slice(0, 8)}...`);
+            const result = await this.setAlias(name, currentSession);
+            if (result === 'ok') {
+              await this.sendText(userId, `✅ 已设置别名：@${name} → ${currentSession.slice(0, 8)}...`);
+            } else {
+              await this.sendText(userId, result);
+            }
           }
         }
         break;
@@ -965,14 +968,19 @@ export class WechatBridge {
     return session ? session.id : null;
   }
   
-  // 设置别名（更新 session 文件中的 name）
-  private async setAlias(name: string, sessionId: string): Promise<void> {
-    // 这里我们需要更新 session 文件中的 name
-    // 暂时先保存到 config 中，后续再优化
+  // 设置别名
+  private async setAlias(name: string, sessionId: string): Promise<string> {
     const { saveAliases } = await import('./config.js');
     const aliases = await this.getAliases();
+    const existing = aliases[name];
+    
     aliases[name] = sessionId;
     saveAliases(aliases);
+    
+    if (existing && existing !== sessionId) {
+      return `⚠️ @${name} 之前指向 ${existing.slice(0, 8)}，已更新 → ${sessionId.slice(0, 8)}`;
+    }
+    return `ok`;
   }
   
   // 路由消息到正确的 session

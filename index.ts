@@ -247,6 +247,7 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       sessionId,
       pid: process.pid,
       cwd: defaultCtx.cwd,
+      name: sessionName || undefined,
     }) as any;
     
     // 启动心跳
@@ -276,6 +277,20 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       currentState = WechatState.WECHAT_LOGGED_IN;
     } else {
       currentState = WechatState.DAEMON_CONNECTED;
+    }
+    
+    // 从守护进程加载当前 session 的别名（如果 pi --name 未被手动设置）
+    if (!sessionName) {
+      try {
+        const aliases = await socketClient.request('get_aliases', {}) as Record<string, string>;
+        for (const [alias, sid] of Object.entries(aliases)) {
+          if (sid === sessionId) {
+            sessionName = alias;
+            console.log(`[微信] 从别名表加载名称: ${sessionName}`);
+            break;
+          }
+        }
+      } catch {}
     }
     
     // 更新状态到文件
@@ -432,18 +447,32 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
             });
           } else if (!targetSession) {
             // 设置当前 session 别名
-            await socketClient.request('set_alias', { name, sessionId });
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: `✅ 已设置别名：@${name} → ${sessionId.slice(0, 8)}...` 
-            });
+            const result = await socketClient.request('set_alias', { name, sessionId }) as any;
+            if (result.updated) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${sessionId.slice(0, 8)}` 
+              });
+            } else {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `✅ 已设置别名：@${name} → ${sessionId.slice(0, 8)}...` 
+              });
+            }
           } else {
             // 设置指定 session 别名
-            await socketClient.request('set_alias', { name, sessionId: targetSession });
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: `✅ 已设置别名：@${name} → ${targetSession.slice(0, 8)}...` 
-            });
+            const result = await socketClient.request('set_alias', { name, sessionId: targetSession }) as any;
+            if (result.updated) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}` 
+              });
+            } else {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `✅ 已设置别名：@${name} → ${targetSession.slice(0, 8)}...` 
+              });
+            }
           }
         }
         break;
@@ -822,6 +851,16 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     
+    // 读取 pi --name（从 session 文件读取 session_info）
+    try {
+      const { getSession } = await import('./src/session-discover.js');
+      const sessionInfo = getSession(sessionId);
+      if (sessionInfo?.name) {
+        sessionName = sessionInfo.name;
+        console.log(`[微信] 检测到 pi 名称: ${sessionName}`);
+      }
+    } catch {}
+    
     // 静默连接（守护进程不在就跳过，不报错）
     if (isDaemonRunning()) {
       const connected = await connectToDaemon(ctx);
@@ -1091,15 +1130,23 @@ export default function wechatManager(pi: ExtensionAPI) {
           }
           if (!targetSession) {
             // 给当前 session 设置别名
-            await socketClient.request('set_alias', { name, sessionId });
+            const result = await socketClient.request('set_alias', { name, sessionId }) as any;
             sessionName = name;
             updateStatusBar(ctx);
-            ctx.ui.notify(`✅ 已设置当前 session 别名: @${name}`, 'info');
+            if (result.updated) {
+              ctx.ui.notify(`⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新`, 'warning');
+            } else {
+              ctx.ui.notify(`✅ 已设置当前 session 别名: @${name}`, 'info');
+            }
             return;
           }
           // 给指定 session 设置别名
-          await socketClient.request('set_alias', { name, sessionId: targetSession });
-          ctx.ui.notify(`✅ 已设置别名: @${name} → ${targetSession.slice(0, 8)}...`, 'info');
+          const result = await socketClient.request('set_alias', { name, sessionId: targetSession }) as any;
+          if (result.updated) {
+            ctx.ui.notify(`⚠️ @${name} 之前指向 ${(result.previousSession as string).slice(0, 8)}，已更新 → ${targetSession.slice(0, 8)}`, 'warning');
+          } else {
+            ctx.ui.notify(`✅ 已设置别名: @${name} → ${targetSession.slice(0, 8)}...`, 'info');
+          }
           break;
         }
         
