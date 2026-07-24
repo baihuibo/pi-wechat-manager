@@ -10,6 +10,7 @@ import {
   SOCKET_PATH,
   PID_FILE,
   HTTP_PORT,
+  DAEMON_VERSION,
   ensureDirectories,
   loadConfig,
   loadAliases,
@@ -522,6 +523,10 @@ function startHttpServer(): void {
           res.end(JSON.stringify(state.wechat));
           return;
           
+        case '/api/version':
+          res.end(JSON.stringify({ version: DAEMON_VERSION }));
+          return;
+          
         default:
           res.writeHead(404);
           res.end(JSON.stringify({ error: 'Not found' }));
@@ -534,12 +539,13 @@ function startHttpServer(): void {
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         name: 'pi-wechat-manager',
-        version: '1.0.0',
+        version: DAEMON_VERSION,
         endpoints: [
           '/api/status',
           '/api/sessions',
           '/api/aliases',
-          '/api/wechat/status'
+          '/api/wechat/status',
+          '/api/version'
         ]
       }));
       return;

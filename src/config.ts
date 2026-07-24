@@ -18,6 +18,7 @@ export const MEDIA_DIR = join(MANAGER_DIR, 'media');
 export const PLIST_PATH = join(HOME, 'Library', 'LaunchAgents', 'com.pi.wechat-manager.plist');
 export const SESSION_REGISTRY_FILE = join(MANAGER_DIR, 'session-registry.json');
 export const HTTP_PORT = 19087;
+export const DAEMON_VERSION = "2";
 
 // 配置接口
 export interface DaemonConfig {

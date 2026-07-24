@@ -5,7 +5,7 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
 import { createConnection, Socket } from 'node:net';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ const PID_FILE = join(MANAGER_DIR, 'daemon.pid');
 import { homedir } from 'node:os';
 import qrcode from 'qrcode-terminal';
 import { getQrCode, pollQrStatus } from './src/wechat-auth.js';
-import { saveCredentials } from './src/config.js';
+import { saveCredentials, DAEMON_VERSION, HTTP_PORT } from './src/config.js';
 import { loadState, saveState, updateWechatStatus, updateSessionStatus, getAliases } from './src/state-store.js';
 
 // 消息分块（微信单条消息限制约 4096 字符）
@@ -800,7 +800,42 @@ function resolveNodeBinary(): string {
 }
 
 async function startDaemon(): Promise<boolean> {
-  if (isDaemonRunning()) return true;
+  // 如果守护进程已在运行，检查版本
+  if (isDaemonRunning()) {
+    try {
+      const http = await import('node:http');
+      const version = await new Promise<string>((resolve, reject) => {
+        const req = http.get(`http://localhost:${HTTP_PORT}/api/version`, { timeout: 2000 }, (res) => {
+          let data = '';
+          res.on('data', (chunk: string) => data += chunk);
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data);
+              resolve(json.version || '');
+            } catch { resolve(''); }
+          });
+        });
+        req.on('error', () => resolve(''));
+        req.on('timeout', () => { req.destroy(); resolve(''); });
+      });
+      
+      if (version === DAEMON_VERSION) {
+        console.log(`[微信] 守护进程版本匹配 (v${DAEMON_VERSION})，无需重启`);
+        return true;
+      }
+      
+      // 版本不匹配，杀掉旧守护进程
+      console.log(`[微信] 守护进程版本不匹配 (运行: v${version}, 当前: v${DAEMON_VERSION})，重启中...`);
+      killDaemon();
+      // 等待进程退出 + 端口释放
+      await new Promise(r => setTimeout(r, 1500));
+    } catch {
+      // HTTP 请求失败，可能是旧版没有 /api/version，杀掉重启
+      console.log(`[微信] 旧版守护进程（无版本接口），重启中...`);
+      killDaemon();
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
   
   const { spawn } = await import('node:child_process');
   const { mkdirSync, openSync } = await import('node:fs');
@@ -832,6 +867,19 @@ async function startDaemon(): Promise<boolean> {
   }
   
   return false;
+}
+
+// 杀掉旧守护进程
+function killDaemon(): void {
+  if (existsSync(PID_FILE)) {
+    try {
+      const pid = parseInt(readFileSync(PID_FILE, 'utf-8'));
+      process.kill(pid, 'SIGTERM');
+      console.log(`[微信] 已发送 SIGTERM 到旧守护进程 (PID: ${pid})`);
+    } catch {}
+  }
+  // 清理 socket 文件
+  try { unlinkSync(SOCKET_PATH); } catch {}
 }
 
 // ============================================================================
