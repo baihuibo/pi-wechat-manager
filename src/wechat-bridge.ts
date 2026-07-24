@@ -221,33 +221,80 @@ export class WechatBridge {
       case 'help': {
         const helpText = `**📱 可用命令：**
 
-**Session 管理：**
-- /new - 创建新 pi
-- /new /path 名 消息 - 指定路径、名称、消息
-- /switch <id> - 切换 session
-- /sessions - 列出 sessions
+` +
+        `**💬 消息路由：**
+` +
+        `- 直接发消息 → 发给默认 pi
+` +
+        `- @名字 消息 → 发给指定名字的 pi
+` +
+        `- @sessionId 消息 → 发给指定 id 的 pi（支持短 id 前缀）
 
-**AI 控制：**
-- /model - 查看可用模型
-- /model <名> - 切换模型
-- /context - 查询上下文用量
-- /compact - 压缩上下文
-- /stop - 停止当前操作
-- /kill - 终止 pi
+` +
+        `**📂 Session 管理：**
+` +
+        `- /new → 创建新 pi 窗口
+` +
+        `- /new 名字 消息 → 创建新 pi，指定名字和首条消息
+` +
+        `- /new /path 名字 消息 → 在指定目录创建
+` +
+        `- /switch 名字 → 切换默认 pi（不发 @ 就发给它）
+` +
+        `- /switch sessionId → 通过 id 切换（支持短 id 前缀）
+` +
+        `- /sessions → 列出所有 pi 及状态
 
-**定时任务：**
-- /cron - 查看列表
-- /cron <名> - 查看详情
-- /cron remove <名> - 删除
+` +
+        `**🎛️ 会话控制：**
+` +
+        `- /stop → 中断当前 pi 的 AI 操作
+` +
+        `- /stop 名字 → 中断指定 pi 的操作
+` +
+        `- /kill → 强制终止当前 pi 进程
+` +
+        `- /kill 名字 → 强制终止指定 pi 进程
+` +
+        `- /progress → 查看当前 pi 的任务进度
+` +
+        `- /progress 名字 → 查看指定 pi 的任务进度
 
-**别名管理：**
-- /alias - 列出别名
-- /alias <名> - 设置别名
+` +
+        `**🤖 AI 控制：**
+` +
+        `- /model → 查看可用模型列表
+` +
+        `- /model 模型名 → 切换模型（如 /model deepseek-v4-flash）
+` +
+        `- /context → 查询当前上下文用量
+` +
+        `- /compact → 压缩上下文
 
-**其他：**
-- /status - 查看状态
-- /progress - 查询进度
-- /help - 显示帮助`;
+` +
+        `**🏷️ 别名管理：**
+` +
+        `- /alias 名字 → 给当前 pi 起个名字（之后用 @名字 找它）
+` +
+        `- /alias 名字 sessionId → 给指定 pi 起名字
+` +
+        `- /alias → 列出所有别名
+
+` +
+        `**⏰ 定时任务：**
+` +
+        `- /cron → 查看定时任务列表
+` +
+        `- /cron <名> → 查看任务详情
+` +
+        `- /cron remove <名> → 删除定时任务
+
+` +
+        `**📊 其他：**
+` +
+        `- /status → 查看连接状态
+` +
+        `- /help → 显示本帮助`;
         await this.sendText(userId, helpText);
         break;
       }
