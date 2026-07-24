@@ -449,16 +449,17 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
       }
       
       case 'compact': {
-        if (ctx) {
-          // 触发压缩（不等待，并行执行）
-          ctx.compact().catch(() => {});
-          // 立即通知用户
-          if (socketClient) {
-            await socketClient.request('send_to_wechat', {
-              userId,
-              text: '♻️ 已触发压缩，完成后会通知',
+        if (ctx && socketClient) {
+          // 通知开始
+          await socketClient.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
+          // 并行执行，完成/失败后通知
+          ctx.compact()
+            .then(() => {
+              socketClient?.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
+            })
+            .catch((e: any) => {
+              socketClient?.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
             });
-          }
         }
         break;
       }
@@ -1186,19 +1187,6 @@ export default function wechatManager(pi: ExtensionAPI) {
         }
       }
     } catch {}
-  });
-  
-  // ===== session_compact：压缩完成通知 =====
-  pi.on('session_compact', async (event, ctx) => {
-    if (lastWechatUser && socketClient) {
-      const reason = event.reason === 'manual' ? '手动触发' : '自动压缩';
-      try {
-        await socketClient.request('send_to_wechat', {
-          userId: lastWechatUser,
-          text: `✅ 上下文压缩完成（${reason}）`,
-        });
-      } catch {}
-    }
   });
   
   // ===== 注册工具 =====
