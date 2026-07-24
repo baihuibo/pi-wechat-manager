@@ -239,82 +239,84 @@ export class WechatBridge {
     
     switch (command) {
       case 'help': {
-        const helpText = `**📱 可用命令：**
+        const helpText = `**📱 可用命令**
 
 ` +
-        `**💬 消息路由：**
+        `**💬 消息**
 ` +
-        `- 直接发消息 → 发给默认 pi
+        `直接发 → 发给默认 pi
 ` +
-        `- @名字 消息 → 发给指定名字的 pi
-` +
-        `- @sessionId 消息 → 发给指定 id 的 pi（支持短 id 前缀）
+        `@[唯一标识] 消息 → 发给指定 pi
 
 ` +
-        `**📂 Session 管理：**
+        `**📂 Session**
 ` +
-        `- /new → 创建新 pi 窗口
+        `/new → 新建 pi
 ` +
-        `- /new 名字 消息 → 创建新 pi，指定名字和首条消息
+        `/new [唯一标识] [消息] → 新建 pi，指定名字和首条消息
 ` +
-        `- /new /path 名字 消息 → 在指定目录创建
+        `- /new 酒店 帮我改登录
 ` +
-        `- /switch 名字 → 切换默认 pi（不发 @ 就发给它）
+        `/new /path [唯一标识] [消息] → 指定目录创建
 ` +
-        `- /switch sessionId → 通过 id 切换（支持短 id 前缀）
+        `- /new /project 酒店 帮我改登录
 ` +
-        `- /sessions → 列出所有 pi 及状态
+        `/switch [唯一标识] → 切换默认 pi
+` +
+        `/sessions → 列出所有 pi（含活跃状态）
 
 ` +
-        `**🎛️ 会话控制：**
+        `**🎛️ 控制**
 ` +
-        `- /stop → 中断当前 pi 的 AI 操作
+        `/stop → 中断当前操作
 ` +
-        `- /stop 名字 → 中断指定 pi 的操作
+        `/stop [唯一标识] → 中断指定 pi
 ` +
-        `- /kill → 强制终止当前 pi 进程
+        `/kill → 终止当前 pi 进程
 ` +
-        `- /kill 名字 → 强制终止指定 pi 进程
+        `/kill [唯一标识] → 终止指定 pi
 ` +
-        `- /progress → 查看当前 pi 的任务进度
+        `/progress → 查看任务进度
 ` +
-        `- /progress 名字 → 查看指定 pi 的任务进度
+        `/progress [唯一标识] → 查看指定 pi 进度
 
 ` +
-        `**🤖 AI 控制：**
+        `**🤖 AI**
 ` +
-        `- /model → 查看可用模型列表
+        `/model → 列出模型
 ` +
-        `- /model 模型名 → 切换模型（如 /model deepseek-v4-flash）
+        `/model [模型名] → 切换模型
 ` +
-        `- /context → 查询当前上下文用量
+        `- /model deepseek-v4-flash
 ` +
-        `- /compact → 压缩上下文
+        `/context → 查询上下文用量
+` +
+        `/compact → 压缩上下文
 
 ` +
-        `**🏷️ 别名管理：**
+        `**🏷️ 别名**
 ` +
-        `- /alias 名字 → 给当前 pi 起个名字（之后用 @名字 找它）
+        `/alias → 列出别名
 ` +
-        `- /alias 名字 sessionId → 给指定 pi 起名字
+        `/alias [名字] → 给当前 pi 起名
 ` +
-        `- /alias → 列出所有别名
+        `/alias [名字] [唯一标识] → 给指定 pi 起名
 
 ` +
-        `**⏰ 定时任务：**
+        `**⏰ 定时**
 ` +
-        `- /cron → 查看定时任务列表
+        `/cron → 查看定时任务
 ` +
-        `- /cron <名> → 查看任务详情
+        `/cron [名字] → 查看详情
 ` +
-        `- /cron remove <名> → 删除定时任务
+        `/cron remove [名字] → 删除
 
 ` +
-        `**📊 其他：**
+        `**📊 其他**
 ` +
-        `- /status → 查看连接状态
+        `/status → 连接状态
 ` +
-        `- /help → 显示本帮助`;
+        `/help → 显示本帮助`;
         await this.sendText(userId, helpText);
         break;
       }
