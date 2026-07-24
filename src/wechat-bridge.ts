@@ -499,7 +499,6 @@ export class WechatBridge {
         const conn = this.state.connections.get(targetSessionId);
         if (conn?.socket.writable) {
           this.state.sendToSession(targetSessionId, 'wechat_command', { command: 'reset', userId });
-          await this.sendText(userId, `✅ 已发送重置指令给 ${targetSessionId.slice(0, 8)}...`);
         } else {
           await this.sendText(userId, `❌ session ${targetSessionId.slice(0, 8)}... 未连接`);
         }
@@ -529,7 +528,6 @@ export class WechatBridge {
         }
         
         this.state.sendToSession(targetSessionId, 'wechat_command', { command: 'stop', userId });
-        await this.sendText(userId, `🛑 已发送停止指令给 ${targetSessionId.slice(0, 8)}...`);
         break;
       }
       
