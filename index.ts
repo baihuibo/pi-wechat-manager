@@ -453,14 +453,15 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
           const sc = socketClient;
           // 通知开始
           await sc.request('send_to_wechat', { userId, text: '♻️ 开始压缩上下文...' });
-          // 并行执行，完成/失败后通知
-          ctx.compact()
-            .then(() => {
+          // 并行执行，完成/失败通知
+          ctx.compact({
+            onComplete: () => {
               sc.request('send_to_wechat', { userId, text: '✅ 上下文压缩完成' }).catch(() => {});
-            })
-            .catch((e: any) => {
+            },
+            onError: (e: any) => {
               sc.request('send_to_wechat', { userId, text: `❌ 压缩失败: ${e.message}` }).catch(() => {});
-            });
+            },
+          });
         }
         break;
       }
