@@ -364,9 +364,9 @@ export class WechatBridge {
 `
           + `**🏷️ 别名**
 `
-          + `- /alias → 列出别名
+          + `- /alias → 列出所有别名（完整 sessionId）
 `
-          + `- /alias [名字] → 给当前 pi 起名
+          + `- /alias [名字] → 查询/设置（已存在=查ID，不存在=起名）
 `
           + `
 `

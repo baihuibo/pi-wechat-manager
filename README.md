@@ -72,10 +72,10 @@ playwright install chromium
 
 ### 🏷️ 别名
 
-| 命令            | 说明           |
-| --------------- | -------------- |
-| `/alias`        | 列出别名       |
-| `/alias [名字]` | 给当前 pi 起名 |
+| 命令            | 说明                              |
+| --------------- | --------------------------------- |
+| `/alias`        | 列出所有别名（含完整 sessionId）  |
+| `/alias [名字]` | 查询 sessionId / 给当前 pi 起名   |
 
 ### ⏰ 定时
 
@@ -96,14 +96,14 @@ playwright install chromium
 
 ## pi 端命令
 
-| 命令                   | 说明                             |
-| ---------------------- | -------------------------------- |
-| `/wechat start`        | 连接微信（守护进程自动持久运行） |
-| `/wechat stop`         | 断开微信                         |
-| `/wechat status`       | 查看桥接状态                     |
-| `/wechat sessions`     | 列出所有 pi 会话                 |
-| `/wechat alias`        | 查看当前别名                     |
-| `/wechat alias [名字]` | 给自己起名                       |
+| 命令                   | 说明                                 |
+| ---------------------- | ------------------------------------ |
+| `/wechat start`        | 连接微信（守护进程自动持久运行）     |
+| `/wechat stop`         | 断开微信                             |
+| `/wechat status`       | 查看桥接状态                         |
+| `/wechat sessions`     | 列出所有 pi 会话                     |
+| `/wechat alias`        | 查看别名表 + 当前别名                |
+| `/wechat alias [名字]` | 查询 sessionId / 给自己起名          |
 
 ---
 

@@ -604,7 +604,7 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
           '**📂 Session**', '/new [唯一标识] [消息] → 新建 pi', '/new /path [唯一标识] [消息] → 指定目录', '/switch [唯一标识] → 切换默认 pi', '/sessions → 列出所有 pi', '',
           '**🎛️ 控制**', '/stop [唯一标识] → 中断操作', '/kill [唯一标识] → 终止进程', '/progress [唯一标识] → 查看进度', '',
           '**🤖 AI**', '/model [模型名] → 列出/切换模型', '/context → 查询上下文用量', '/compact → 压缩上下文', '',
-          '**🏷️ 别名**', '/alias → 列出别名', '/alias [名字] → 给当前 pi 起名', '',
+          '**🏷️ 别名**', '/alias → 列出所有别名（完整 sessionId）', '/alias [名字] → 查询/设置（已存在=查ID，不存在=起名）', '',
           '**⏰ 定时**', '/cron → 查看定时任务', '/cron remove [名字] → 删除', '',
           '**📊 其他**', '/status → 连接状态',
         ].join('\n');
@@ -1205,8 +1205,8 @@ export default function wechatManager(pi: ExtensionAPI) {
             '/wechat stop    停止守护进程并退出登录',
             '/wechat status  查看连接状态',
             '/wechat sessions  列出所有 pi 会话',
-            '/wechat alias   查看当前别名',
-            '/wechat alias [名字]  给自己起名',
+            '/wechat alias   查看别名表 + 当前别名',
+            '/wechat alias [名字]  查询/设置（已存在=查ID，不存在=起名）',
           ].join('\n'), 'info');
       }
     }
