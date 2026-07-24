@@ -171,12 +171,32 @@ export class WechatBridge {
     }
     
     // 构造消息数据
-    const messageData = {
+    const messageData: any = {
       userId: message.userId,
       text: messageText,
-      images: message.imageUrls?.map(img => img.url) || [],
+      images: [],
       timestamp: Date.now(),
     };
+    
+    // 下载图片到临时文件
+    if (message.imageUrls?.length) {
+      const { mkdtempSync, writeFileSync } = await import('node:fs');
+      const { join: jp } = await import('node:path');
+      const { tmpdir: td } = await import('node:os');
+      const tmpDir = mkdtempSync(jp(td(), 'pi-wechat-img-'));
+      for (let i = 0; i < message.imageUrls.length; i++) {
+        const img = message.imageUrls[i];
+        try {
+          const resp = await fetch(img.url);
+          const buf = Buffer.from(await resp.arrayBuffer());
+          const tmpPath = jp(tmpDir, `img_${i}.jpg`);
+          writeFileSync(tmpPath, buf);
+          messageData.images.push(tmpPath);
+        } catch (e) {
+          console.error('[微信] 下载图片失败:', e);
+        }
+      }
+    }
     
     // 检查目标 session 是否有 pi 在运行
     const conn = this.state.connections.get(targetSessionId);
