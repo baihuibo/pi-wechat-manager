@@ -437,14 +437,7 @@ export class WechatBridge {
         console.log(`[微信] 启动脚本: ${scriptPath}`);
         console.log(`[微信] 脚本内容:\n${scriptContent}`);
         
-        // 标记有新 session 即将创建
-        this.state.pendingNewSession = true;
-        
-        // 启动终端 + pi
-        const child = await this.spawnTerminal(scriptPath);
-        child.unref();
-        
-        // 消息入队（等待 pi 连接后自动投递）
+        // 消息先入队，再标记 pending（防止新 pi 抢先连接导致消息丢失）
         this.state.enqueueMessage('__pending__', {
           id: `msg_${Date.now()}`,
           sessionId: '__pending__',
@@ -454,6 +447,12 @@ export class WechatBridge {
           timestamp: Date.now(),
           retries: 0,
         });
+        
+        this.state.pendingNewSession = true;
+        
+        // 启动终端 + pi
+        const child = await this.spawnTerminal(scriptPath);
+        child.unref();
         
         // 发送启动消息
         await this.sendText(userId, `⏳ 正在启动 pi...`);
