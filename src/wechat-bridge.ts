@@ -103,7 +103,11 @@ export class WechatBridge {
           break;
         }
         
-        console.error('[微信] 轮询失败:', error instanceof Error && error.message === 'terminated' ? '(超时重连)' : error);
+        // terminated 是正常超时，不输出日志
+        const errMsg = error instanceof Error ? error.message : String(error);
+        if (errMsg !== 'terminated') {
+          console.error('[微信] 轮询失败:', error);
+        }
         await new Promise(r => setTimeout(r, retryDelay));
         retryDelay = Math.min(retryDelay * 2, 30000);
       }

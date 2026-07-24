@@ -629,10 +629,12 @@ export default function wechatManager(pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId();
     
-    // 静默尝试连接
-    const connected = await connectToDaemon(ctx);
-    if (!connected) {
-      currentState = WechatState.IDLE;
+    // 静默连接（守护进程不在就跳过，不报错）
+    if (isDaemonRunning()) {
+      const connected = await connectToDaemon(ctx);
+      if (!connected) {
+        currentState = WechatState.IDLE;
+      }
     }
   });
   
