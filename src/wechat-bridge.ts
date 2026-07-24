@@ -488,12 +488,13 @@ export class WechatBridge {
           return `${date.getMonth() + 1}/${date.getDate()} ${hm}`;
         };
 
-        // 取最后消息做摘要（简短）
+        // 取最后消息做摘要（去换行、限长度）
         const getSummary = (s: any): string => {
-          if (s.lastMessage) {
-            return s.lastMessage.length > 28 ? s.lastMessage.slice(0, 28) + '...' : s.lastMessage;
-          }
-          return s.messageCount > 0 ? '...' : '(空)';
+          if (!s.lastMessage) return s.messageCount > 0 ? '(无文字)' : '(空)';
+          // 去换行，截断到 20 个中文字符/40 个英文
+          const clean = s.lastMessage.replace(/\n/g, ' ').trim();
+          if (clean.length <= 24) return clean;
+          return clean.slice(0, 24) + '…';
         };
 
         const total = sessions.length;
@@ -508,7 +509,7 @@ export class WechatBridge {
           const summary = getSummary(s);
           const time = fmtTime(s.modified);
 
-          // 别名 或 pi --name 都显示为 @名称；否则显示 short ID
+          // 别名 或 pi --name 都显示为 @名称；否则显示短 ID
           const alias = sessionToAlias.get(s.id);
           const displayName = (alias || s.name)
             ? `@${alias || s.name}`

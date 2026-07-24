@@ -109,7 +109,7 @@ export function listSessions(): SessionInfo[] {
     return [];
   }
   
-  const sessions: SessionInfo[] = [];
+  const seen = new Map<string, SessionInfo>(); // 按 ID 去重，保留最新
   
   try {
     const dirs = readdirSync(SESSIONS_DIR);
@@ -127,9 +127,10 @@ export function listSessions(): SessionInfo[] {
           const header = parseSessionHeader(filePath);
           
           if (header) {
+            const id = header.id || file.replace('.jsonl', '');
             const fileStat = statSync(filePath);
-            sessions.push({
-              id: header.id || file.replace('.jsonl', ''),
+            const session: SessionInfo = {
+              id,
               path: filePath,
               cwd: header.cwd || '',
               name: getSessionName(filePath) || header.name,
@@ -137,13 +138,21 @@ export function listSessions(): SessionInfo[] {
               modified: fileStat.mtime,
               lastMessage: getLastUserMessage(filePath),
               messageCount: countMessages(filePath),
-              isActive: false, // 需要通过 daemon 状态更新
-            });
+              isActive: false,
+            };
+            
+            // 同一 ID 只保留修改时间最新的
+            const existing = seen.get(id);
+            if (!existing || session.modified > existing.modified) {
+              seen.set(id, session);
+            }
           }
         }
       } catch {}
     }
   } catch {}
+  
+  const sessions = [...seen.values()];
   
   // 按修改时间倒序
   sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
