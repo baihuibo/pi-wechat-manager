@@ -2,8 +2,6 @@
 
 > 微信控制 pi（AI 编程助手）的专属插件 —— 多个 pi 同时工作，一个微信全搞定。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 **在微信上指挥 pi 写代码、截图、定时任务，甚至从被窝里让它帮你干活。**
 
 ---
@@ -13,7 +11,12 @@
 ### 安装
 
 ```bash
-pi install npm:pi-wechat-manager
+# 安装插件
+pi install git:github.com/baihuibo/pi-wechat-manager@main
+
+# 截屏功能依赖（可选，不需要截屏可跳过）
+npm install -g playwright
+playwright install chromium
 ```
 
 ### 启动
@@ -39,13 +42,19 @@ pi install npm:pi-wechat-manager
 | `/new 酒店 你好` | 创建新 pi，名称"酒店"，消息"你好" |
 | `/new /path/to 酒店 你好` | 在指定路径创建 |
 | `/switch 酒店` | 切换到指定 pi |
+| `/sessions` | 列出所有 sessions |
 | `/stop` / `/stop 酒店` | 停止当前/指定 pi |
 | `/kill` / `/kill 酒店` | 终止当前/指定 pi |
 | `/progress` | 查询任务进度 |
-| `/reset` | 清空上下文 |
+| `/model` | 查看可用模型 |
+| `/model <名>` | 切换模型 |
+| `/compact` | 压缩上下文 |
+| `/context` | 查询上下文用量 |
 | `/alias 酒店` | 给当前 pi 起名字 |
+| `/aliases` | 列出所有别名 |
 | `@酒店 消息` | 发消息给指定 pi |
 | `/status` / `/help` | 查看状态/帮助 |
+| `/cron` | 查看定时任务 |
 
 ---
 
@@ -65,7 +74,7 @@ pi install npm:pi-wechat-manager
 
 ### 📸 截屏
 
-在微信对 pi 说**自然语言**就行：
+先安装截屏依赖（见上面"安装"部分），然后在微信对 pi 说**自然语言**就行：
 
 ```
 截屏看看桌面
@@ -118,6 +127,17 @@ AI 帮你管理，直接说人话：
 - **守护进程**：独立于 pi 运行，微信消息的中转站
 - **pi 扩展**：每个 pi 窗口自动连接守护进程
 - **端口**：19087（HTTP API，调试用）
+
+---
+
+## 更新
+
+```bash
+cd ~/.pi/agent/git/github.com/baihuibo/pi-wechat-manager
+git pull
+```
+
+然后在 pi 中 `/reload`。
 
 ---
 
