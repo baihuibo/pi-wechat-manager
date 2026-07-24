@@ -355,40 +355,82 @@ export class WechatBridge {
       
       case 'sessions': {
         const { listSessions } = await import('./session-discover.js');
-        const { summarizeSessions } = await import('./llm-summarizer.js');
-        
+
         const sessions = listSessions();
         if (sessions.length === 0) {
           await this.sendText(userId, '❌ 没有找到 session');
           break;
         }
-        
-        // 发送加载提示
-        await this.sendText(userId, '⏳ 正在汇总 sessions...');
-        
-        // 获取别名映射（反向：sessionId -> alias）
+
+        // 获取别名映射
         const aliases = await this.getAliases();
         const sessionToAlias = new Map<string, string>();
         for (const [alias, sessionId] of Object.entries(aliases)) {
           sessionToAlias.set(sessionId, alias);
         }
-        
-        // 批量摘要
-        const summaries = await summarizeSessions(
-          sessions.slice(0, 10).map((s: any) => ({ path: s.path, name: s.name }))
-        );
-        
-        const sessionList = sessions.slice(0, 10).map((s: any) => {
-          const name = s.name || s.id.slice(0, 8);
-          const active = this.state.connections.has(s.id) ? '🟢' : '⚪';
-          const summary = summaries.get(s.path) || '无摘要';
+
+        // 排序：活跃的在前，再按修改时间倒序
+        const sorted = [...sessions].sort((a: any, b: any) => {
+          const aActive = this.state.connections.has(a.id);
+          const bActive = this.state.connections.has(b.id);
+          if (aActive && !bActive) return -1;
+          if (!aActive && bActive) return 1;
+          return b.modified.getTime() - a.modified.getTime();
+        });
+
+        // 智能时间格式化
+        const fmtTime = (date: Date): string => {
+          const now = new Date();
+          const diff = now.getTime() - date.getTime();
+          if (diff < 60000) return '刚刚';
+          if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+
+          const isToday = now.toDateString() === date.toDateString();
+          const yesterday = new Date(now);
+          yesterday.setDate(yesterday.getDate() - 1);
+          const isYesterday = yesterday.toDateString() === date.toDateString();
+
+          const hm = date.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+          if (isToday) return hm;
+          if (isYesterday) return `昨天 ${hm}`;
+          return `${date.getMonth() + 1}/${date.getDate()} ${hm}`;
+        };
+
+        // 取最后消息做摘要（简短）
+        const getSummary = (s: any): string => {
+          if (s.lastMessage) {
+            return s.lastMessage.length > 28 ? s.lastMessage.slice(0, 28) + '...' : s.lastMessage;
+          }
+          return s.messageCount > 0 ? '...' : '(空)';
+        };
+
+        const total = sessions.length;
+        const displayCount = Math.min(10, sorted.length);
+        const header = total > displayCount
+          ? `**📋 Sessions（${total} 个，显示前 ${displayCount} 个）**`
+          : `**📋 Sessions（${total} 个）**`;
+
+        const lines = sorted.slice(0, displayCount).map((s: any) => {
+          const isActive = this.state.connections.has(s.id);
+          const status = isActive ? '🟢' : '⚪';
+          const displayName = s.name || s.id.slice(0, 8);
+          const summary = getSummary(s);
+          const time = fmtTime(s.modified);
+
+          // 别名：只在有别于 name/ID 时显示
           const alias = sessionToAlias.get(s.id);
-          const aliasTag = alias ? ` @${alias}` : '';
-          const time = new Date(s.modified).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-          return `${active} **${name}**${aliasTag}\n   ${summary}\n   ${time}`;
-        }).join('\n\n');
-        
-        await this.sendText(userId, `**📋 Sessions：**\n\n${sessionList}`);
+          const aliasLine = (alias && alias !== displayName && alias !== s.id)
+            ? `   @${alias}`
+            : '';
+
+          let line = `${status} ${displayName}`;
+          if (summary) line += `  ${summary}`;
+          line += `  ${time}`;
+          if (aliasLine) line += `\n${aliasLine}`;
+          return line;
+        });
+
+        await this.sendText(userId, `${header}\n\n${lines.join('\n')}\n\n💡 使用 /switch <id> 切换 session`);
         break;
       }
       
