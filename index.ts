@@ -374,7 +374,7 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
           '/compact → 压缩上下文',
           '',
           '**🏷️ 别名**',
-          '/alias [名字] [唯一标识]',
+          '/alias [名字]',
           '',
           '**⏰ 定时**',
           '/cron → 查看定时任务',

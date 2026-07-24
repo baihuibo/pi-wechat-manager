@@ -74,7 +74,6 @@ playwright install chromium
 |------|------|
 | `/alias` | 列出别名 |
 | `/alias [名字]` | 给当前 pi 起名 |
-| `/alias [名字] [唯一标识]` | 给指定 pi 起名 |
 
 ### ⏰ 定时
 
