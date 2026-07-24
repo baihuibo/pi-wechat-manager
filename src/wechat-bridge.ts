@@ -239,83 +239,33 @@ export class WechatBridge {
     
     switch (command) {
       case 'help': {
-        const helpText = `**📱 可用命令**
-
-` +
-        `**💬 消息**
-` +
-        `直接发 → 发给默认 pi
-` +
-        `@[唯一标识] 消息 → 发给指定 pi
-
-` +
-        `**📂 Session**
-` +
-        `/new → 新建 pi
-` +
-        `/new [唯一标识] [消息] → 新建 pi，指定名字和首条消息
-` +
-        `- /new 酒店 帮我改登录
-` +
-        `/new /path [唯一标识] [消息] → 指定目录创建
-` +
-        `- /new /project 酒店 帮我改登录
-` +
-        `/switch [唯一标识] → 切换默认 pi
-` +
-        `/sessions → 列出所有 pi（含活跃状态）
-
-` +
-        `**🎛️ 控制**
-` +
-        `/stop → 中断当前操作
-` +
-        `/stop [唯一标识] → 中断指定 pi
-` +
-        `/kill → 终止当前 pi 进程
-` +
-        `/kill [唯一标识] → 终止指定 pi
-` +
-        `/progress → 查看任务进度
-` +
-        `/progress [唯一标识] → 查看指定 pi 进度
-
-` +
-        `**🤖 AI**
-` +
-        `/model → 列出模型
-` +
-        `/model [模型名] → 切换模型
-` +
-        `- /model deepseek-v4-flash
-` +
-        `/context → 查询上下文用量
-` +
-        `/compact → 压缩上下文
-
-` +
-        `**🏷️ 别名**
-` +
-        `/alias → 列出别名
-` +
-        `/alias [名字] → 给当前 pi 起名
-` +
-        `/alias [名字] → 给当前 pi 起名
-
-` +
-        `**⏰ 定时**
-` +
-        `/cron → 查看定时任务
-` +
-        `/cron [名字] → 查看详情
-` +
-        `/cron remove [名字] → 删除
-
-` +
-        `**📊 其他**
-` +
-        `/status → 连接状态
-` +
+        const helpText = `**📱 可用命令**\n\n` +
+        `**💬 消息**\n` +
+        `直接发 → 发给默认 pi\n` +
+        `@[唯一标识] 消息 → 发给指定 pi\n\n` +
+        `**📂 Session**\n` +
+        `/new → 新建 pi\n` +
+        `/new [唯一标识] [消息] → 新建 pi，指定名字和首条消息\n` +
+        `/new /path [唯一标识] [消息] → 指定目录创建\n` +
+        `/switch [唯一标识] → 切换默认 pi\n` +
+        `/sessions → 列出所有 pi\n\n` +
+        `**🎛️ 控制**\n` +
+        `/stop [唯一标识] → 中断操作\n` +
+        `/kill [唯一标识] → 终止进程\n` +
+        `/progress [唯一标识] → 查看进度\n\n` +
+        `**🤖 AI**\n` +
+        `/model [模型名] → 列出/切换模型\n` +
+        `/context → 查询上下文用量\n` +
+        `/compact → 压缩上下文\n\n` +
+        `**🏷️ 别名**\n` +
+        `/alias → 列出别名\n` +
+        `/alias [名字] → 给当前 pi 起名\n\n` +
+        `**⏰ 定时**\n` +
+        `/cron → 查看定时任务\n` +
+        `/cron [名字] → 查看详情\n` +
+        `/cron remove [名字] → 删除\n\n` +
+        `**📊 其他**\n` +
+        `/status → 连接状态\n` +
         `/help → 显示本帮助`;
         await this.sendText(userId, helpText);
         break;
