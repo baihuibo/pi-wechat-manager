@@ -434,7 +434,7 @@ export class WechatBridge {
         
         // 使用 --name 参数设置 session 名称，pi 会自动创建 session
         const sessionName = aliasName || `wechat-${Date.now()}`;
-        const scriptContent = `#!/bin/bash\ncd "${projectPath}"\npi --name "${sessionName}" --approve\n`;
+        const scriptContent = `#!/bin/bash\ncd "${projectPath}" 2>&1 || { echo "目录不存在: ${projectPath}"; read; exit 1; }\npi --name "${sessionName}" --approve 2>&1 || { echo \"pi 启动失败\"; read; }\n`;
         writeFileSync(scriptPath, scriptContent, 'utf-8');
         chmodSync(scriptPath, '755');
         
@@ -830,7 +830,7 @@ export class WechatBridge {
       const { writeFileSync, chmodSync } = await import('node:fs');
       const { join } = await import('node:path');
       const scriptPath = join(cwd, '.pi-start.sh');
-      const scriptContent = `#!/bin/bash\ncd "${cwd}"\npi --session-id "${sessionId}" --approve\n`;
+      const scriptContent = `#!/bin/bash\ncd "${cwd}" 2>&1 || { echo "目录不存在: ${cwd}"; read; exit 1; }\npi --session-id "${sessionId}" --approve 2>&1 || { echo \"pi 启动失败\"; read; }\n`;
       writeFileSync(scriptPath, scriptContent, 'utf-8');
       chmodSync(scriptPath, '755');
       
