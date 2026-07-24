@@ -523,24 +523,28 @@ export class WechatBridge {
       
       case 'alias': {
         const name = args?.trim();
+        const aliases = await this.getAliases();
+        
         if (!name) {
           // /alias → 列出所有别名
-          const aliases = await this.getAliases();
           if (Object.keys(aliases).length === 0) {
             await this.sendText(userId, 'ℹ️ **没有设置别名**\n\n使用 /alias [名字] 给当前 pi 起名');
           } else {
-            const aliasList = Object.entries(aliases).map(([k, v]) => `- @${k} → ${v.slice(0, 8)}...`).join('\n');
+            const aliasList = Object.entries(aliases).map(([k, v]) => `- @${k} → \`${v}\``).join('\n');
             await this.sendText(userId, `**📋 别名列表：**\n\n${aliasList}`);
           }
+        } else if (aliases[name]) {
+          // /alias <已存在的别名> → 查询完整 sessionId
+          await this.sendText(userId, `@${name} → \`${aliases[name]}\``);
         } else {
-          // /alias 名字 → 给当前 session 起名
+          // /alias <新名字> → 给当前 session 起名
           const currentSession = this.state.defaultSessionId;
           if (!currentSession) {
             await this.sendText(userId, '❌ 没有当前 session，请先启动 pi');
           } else {
             const result = await this.setAlias(name, currentSession);
             if (result === 'ok') {
-              await this.sendText(userId, `✅ 已设置别名：@${name} → ${currentSession.slice(0, 8)}...`);
+              await this.sendText(userId, `✅ 已设置别名：@${name} → \`${currentSession}\``);
             } else {
               await this.sendText(userId, result);
             }
