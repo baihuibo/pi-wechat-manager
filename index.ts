@@ -461,6 +461,56 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
         break;
       }
       
+      case 'context': {
+        // /context 或 /context <别名>
+        // 查询上下文使用量
+        const targetAlias = args;
+        
+        if (targetAlias && socketClient) {
+          // 查询指定 session（暂不支持，提示）
+          await socketClient.request('send_to_wechat', { 
+            userId, 
+            text: '⚠️ /context <别名> 暂不支持，请用 @别名 切换到目标后再查' 
+          });
+        } else if (ctx) {
+          try {
+            const usage = ctx.getContextUsage();
+            if (usage && usage.tokens > 0) {
+              const percent = usage.percent !== undefined ? Math.round(usage.percent) : '?';
+              let text = `**📊 上下文用量**\n\n`;
+              text += `- Tokens: ${usage.tokens.toLocaleString()}\n`;
+              if (usage.percent !== undefined) {
+                text += `- 使用率: ${percent}%\n`;
+                const bar = '█'.repeat(Math.min(Math.round(usage.percent / 5), 20));
+                const empty = '░'.repeat(20 - bar.length);
+                text += `- [${bar}${empty}]\n`;
+              }
+              if (usage.percent !== undefined && usage.percent > 70) {
+                text += '\n⚠️ 建议 /compact';
+              }
+              if (socketClient) {
+                await socketClient.request('send_to_wechat', { userId, text });
+              }
+            } else {
+              if (socketClient) {
+                await socketClient.request('send_to_wechat', { 
+                  userId, 
+                  text: '📊 暂无上下文数据' 
+                });
+              }
+            }
+          } catch (e: any) {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `❌ 查询失败: ${e.message}` 
+              });
+            }
+          }
+        }
+        break;
+      }
+      
       case 'model': {
         const modelName = args?.modelName;
         
@@ -472,19 +522,19 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
             const { join } = await import('node:path');
             
             let listText = '**🤖 可用模型：**\n\n';
-            const modelsPath = join(homedir(), '.pi', 'agent', 'models.json');
+            const modelsPath = join(homedir(), '.pi', 'agent', 'models-store.json');
             if (existsSync(modelsPath)) {
-              const models = JSON.parse(readFileSync(modelsPath, 'utf-8'));
-              if (Array.isArray(models) && models.length > 0) {
-                for (const m of models.slice(0, 15)) {
-                  listText += `- ${m.name || m.id}\n`;
+              const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
+              const allModels: string[] = [];
+              for (const [provider, data] of Object.entries(store) as any) {
+                for (const m of (data as any).models || []) {
+                  allModels.push(`- ${m.id}`);
                 }
-                listText += `\n当前: ${models[0]?.name || '?'}`;
-              } else {
-                listText += '（空配置）';
               }
+              listText += allModels.slice(0, 20).join('\n');
+              listText += '\n\n输入 /model <名称> 切换';
             } else {
-              listText += '（未找到 models.json）';
+              listText += '（未找到模型配置）';
             }
             
             if (socketClient) {
@@ -1133,6 +1183,19 @@ export default function wechatManager(pi: ExtensionAPI) {
         }
       }
     } catch {}
+  });
+  
+  // ===== session_compact：压缩完成通知 =====
+  pi.on('session_compact', async (event, ctx) => {
+    if (lastWechatUser && socketClient) {
+      const reason = event.reason === 'manual' ? '手动触发' : '自动压缩';
+      try {
+        await socketClient.request('send_to_wechat', {
+          userId: lastWechatUser,
+          text: `✅ 上下文压缩完成（${reason}）`,
+        });
+      } catch {}
+    }
   });
   
   // ===== 注册工具 =====

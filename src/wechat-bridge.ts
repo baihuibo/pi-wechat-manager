@@ -230,6 +230,7 @@ export class WechatBridge {
 **AI 控制：**
 - /model - 查看可用模型
 - /model <名> - 切换模型
+- /context - 查询上下文用量
 - /compact - 压缩上下文
 - /stop - 停止当前操作
 - /kill - 终止 pi
@@ -753,8 +754,8 @@ export class WechatBridge {
       }
       
       default:
-        // pi 侧命令：/model、/compact
-        if (['model', 'compact'].includes(command)) {
+        // pi 侧命令：/model、/compact、/context
+        if (['model', 'compact', 'context'].includes(command)) {
           const targetSessionId = this.state.defaultSessionId;
           if (!targetSessionId) {
             await this.sendText(userId, '❌ 没有活跃的 pi');

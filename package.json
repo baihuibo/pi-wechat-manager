@@ -1,6 +1,6 @@
 {
   "name": "pi-wechat-manager",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "通过微信远程控制 pi（AI 编程助手），支持多 session、定时任务、截屏等",
   "type": "module",
   "main": "index.ts",
