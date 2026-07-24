@@ -10,7 +10,8 @@
 
 ```bash
 # 安装插件
-pi install git:github.com/baihuibo/pi-wechat-manager@main
+pi install git:git@github.com:baihuibo/pi-wechat-manager.git  # 推荐 ssh 方式
+pi install git:github.com/baihuibo/pi-wechat-manager@main # 或者 https 方式
 
 # 截屏功能依赖（可选，不需要截屏可跳过）
 npm install -g playwright
@@ -180,6 +181,7 @@ playwright install chromium
 # 2. 彻底退出 pi
 
 # 3. 使用 pi 更新
+pi update git:git@github.com:baihuibo/pi-wechat-manager.git # 推荐 ssh 方式
 pi update git:github.com/baihuibo/pi-wechat-manager@main
 
 # 4. 重新启动pi，启动微信
