@@ -1110,7 +1110,8 @@ export default function wechatManager(pi: ExtensionAPI) {
             '/wechat stop     停止守护进程并退出登录',
             '/wechat status   查看状态',
             '/wechat sessions 列出 sessions',
-            '/wechat alias    管理别名',
+            '/wechat alias    查看当前别名',
+            '/wechat alias <名称>  给自己起名字',
           ].join('\n'), 'info');
       }
     }
