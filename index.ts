@@ -523,28 +523,29 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
         if (!modelName) {
           // /model → 显示可用模型
           try {
-            const { readFileSync, existsSync } = await import('node:fs');
-            const { homedir } = await import('node:os');
-            const { join } = await import('node:path');
-            
-            let listText = '**🤖 可用模型：**\n\n';
-            const modelsPath = join(homedir(), '.pi', 'agent', 'models-store.json');
-            if (existsSync(modelsPath)) {
-              const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
-              const allModels: string[] = [];
-              for (const [provider, data] of Object.entries(store) as any) {
-                for (const m of (data as any).models || []) {
-                  allModels.push(`- ${m.id}`);
+            if (ctx && ctx.modelRegistry) {
+              let listText = '**🤖 可用模型：**\n\n';
+              // 从 models-store.json 遍历（ctx.modelRegistry 只暴露 provider-level API）
+              const { readFileSync, existsSync } = await import('node:fs');
+              const { homedir } = await import('node:os');
+              const { join } = await import('node:path');
+              const modelsPath = join(homedir(), '.pi', 'agent', 'models-store.json');
+              if (existsSync(modelsPath)) {
+                const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
+                const allModels: string[] = [];
+                for (const [provider, data] of Object.entries(store) as any) {
+                  for (const m of (data as any).models || []) {
+                    allModels.push(`- ${m.id}`);
+                  }
                 }
+                listText += allModels.slice(0, 20).join('\n');
+                listText += '\n\n输入 /model <名称> 切换';
+              } else {
+                listText += '（未找到模型配置）';
               }
-              listText += allModels.slice(0, 20).join('\n');
-              listText += '\n\n输入 /model <名称> 切换';
-            } else {
-              listText += '（未找到模型配置）';
-            }
-            
-            if (socketClient) {
-              await socketClient.request('send_to_wechat', { userId, text: listText });
+              if (socketClient) {
+                await socketClient.request('send_to_wechat', { userId, text: listText });
+              }
             }
           } catch (e: any) {
             if (socketClient) {
@@ -554,19 +555,54 @@ function setupMessageHandler(client: SocketClient, ctx: Ctx) {
               });
             }
           }
-        } else {
-          // /model <name> → 切换
-          if (globalPi && socketClient) {
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: `🔄 正在切换到 ${modelName}...` 
-            });
-            globalPi.sendUserMessage(`/model ${modelName}`, { deliverAs: 'steer' });
-          } else if (socketClient) {
-            await socketClient.request('send_to_wechat', { 
-              userId, 
-              text: '❌ pi 未就绪' 
-            });
+        } else if (globalPi && ctx) {
+          // /model <name> → 用 pi.setModel() 直接切换
+          try {
+            // 从 models-store.json 找到 provider
+            const { readFileSync, existsSync } = await import('node:fs');
+            const { homedir } = await import('node:os');
+            const { join } = await import('node:path');
+            const modelsPath = join(homedir(), '.pi', 'agent', 'models-store.json');
+            let provider = '';
+            if (existsSync(modelsPath)) {
+              const store = JSON.parse(readFileSync(modelsPath, 'utf-8'));
+              for (const [pid, data] of Object.entries(store) as any) {
+                for (const m of (data as any).models || []) {
+                  if (m.id === modelName) {
+                    provider = pid;
+                    break;
+                  }
+                }
+                if (provider) break;
+              }
+            }
+            if (!provider) {
+              if (socketClient) {
+                await socketClient.request('send_to_wechat', { userId, text: `❌ 未找到模型: ${modelName}` });
+              }
+              break;
+            }
+            const model = ctx.modelRegistry.find(provider, modelName);
+            if (!model) {
+              if (socketClient) {
+                await socketClient.request('send_to_wechat', { userId, text: `❌ 无法加载模型: ${modelName}` });
+              }
+              break;
+            }
+            const success = await globalPi.setModel(model);
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: success ? `✅ 已切换到 ${modelName}` : `❌ 切换失败（可能缺少 API key）` 
+              });
+            }
+          } catch (e: any) {
+            if (socketClient) {
+              await socketClient.request('send_to_wechat', { 
+                userId, 
+                text: `❌ 切换失败: ${e.message}` 
+              });
+            }
           }
         }
         break;
