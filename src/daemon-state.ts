@@ -49,6 +49,23 @@ export interface QueuedMessage {
   expiresAt: number;
 }
 
+// PendingSession 状态
+export type PendingSessionStatus = 'pending' | 'connected' | 'inactive' | 'timeout' | 'killed';
+
+// PendingSession - /new 创建后追踪的线程生命周期
+export interface PendingSession {
+  alias: string;              // 用户指定或自动生成，主键
+  sessionId: string;          // pi --session-id 的值
+  projectPath: string;        // 工作目录
+  status: PendingSessionStatus;
+  createdAt: number;
+  createdBy: string;          // userId
+  initialMessage?: string;    // 创建时的初始消息
+  piPid?: number;             // pi 进程 pid（连接后才有）
+  terminalPid?: number;       // 终端窗口 pid（如果能拿到）
+  lastNotifyAt?: number;      // 上次通知用户超时的时间
+}
+
 // 定时任务
 export interface CronTask {
   id: string;
@@ -99,6 +116,9 @@ export class DaemonState {
   
   // 定时任务列表
   cronTasks: Map<string, CronTask> = new Map();
+  
+  // Pending Sessions（/new 创建的线程生命周期管理）
+  pendingSessions: Map<string, PendingSession> = new Map();  // key = alias
   
   // 注册连接
   register(sessionId: string, pid: number, cwd: string, socket: Socket, name?: string): void {
@@ -501,6 +521,223 @@ export class DaemonState {
     }
     
     return stale;
+  }
+  
+  // ===== Pending Sessions =====
+  
+  // 创建 PendingSession
+  createPendingSession(params: {
+    alias: string;
+    sessionId: string;
+    projectPath: string;
+    createdBy: string;
+    initialMessage?: string;
+  }): PendingSession {
+    // 如果同名已存在，先清理旧的
+    const existing = this.pendingSessions.get(params.alias);
+    if (existing) {
+      this.killPendingSessionProcess(existing);
+    }
+    
+    const ps: PendingSession = {
+      alias: params.alias,
+      sessionId: params.sessionId,
+      projectPath: params.projectPath,
+      status: 'pending',
+      createdAt: Date.now(),
+      createdBy: params.createdBy,
+      initialMessage: params.initialMessage,
+    };
+    this.pendingSessions.set(params.alias, ps);
+    console.log(`[Pending] 创建: alias=${params.alias}, sessionId=${params.sessionId.slice(0,8)}`);
+    return ps;
+  }
+  
+  // 通过 sessionId 查找 PendingSession
+  findBySessionId(sessionId: string): PendingSession | undefined {
+    for (const ps of this.pendingSessions.values()) {
+      if (ps.sessionId === sessionId) return ps;
+    }
+    return undefined;
+  }
+  
+  // 通过别名查找
+  findByAlias(alias: string): PendingSession | undefined {
+    return this.pendingSessions.get(alias);
+  }
+  
+  // pi 连接时：通过 sessionId 或 name 匹配 PendingSession，标记为 connected
+  // 返回匹配到的 PendingSession，并回填真实 sessionId
+  matchAndConnect(sessionId: string, pid: number, name?: string): PendingSession | undefined {
+    // 1. 先按 sessionId 精确匹配
+    let ps = this.findBySessionId(sessionId);
+    
+    // 2. 再按 name（alias）匹配
+    if (!ps && name) {
+      ps = this.findByAlias(name);
+    }
+    
+    if (ps) {
+      // 回填真实 sessionId（可能和占位符不同）
+      if (ps.sessionId !== sessionId) {
+        console.log(`[Pending] ${ps.alias} sessionId 回填: ${ps.sessionId.slice(0,8)} → ${sessionId.slice(0,8)}`);
+        // 迁移消息队列
+        const oldQueue = this.messageQueue.get(ps.sessionId);
+        if (oldQueue && oldQueue.length > 0) {
+          const newQueue = this.messageQueue.get(sessionId) || [];
+          this.messageQueue.set(sessionId, [...newQueue, ...oldQueue]);
+          this.messageQueue.delete(ps.sessionId);
+          console.log(`[Pending] 迁移 ${oldQueue.length} 条队列消息到新 sessionId`);
+        }
+        // 迁移 pendingNewMessages（legacy）
+        const oldPending = this.pendingNewMessages.get(ps.sessionId);
+        if (oldPending) {
+          this.pendingNewMessages.set(sessionId, oldPending);
+          this.pendingNewMessages.delete(ps.sessionId);
+        }
+        ps.sessionId = sessionId;
+      }
+      ps.status = 'connected';
+      ps.piPid = pid;
+      ps.lastNotifyAt = undefined;
+      console.log(`[Pending] ${ps.alias} → connected (pid=${pid})`);
+    }
+    return ps;
+  }
+  
+  // pi 连接时：标记为 connected（仅按 sessionId，用于向后兼容）
+  markPendingConnected(sessionId: string, pid: number): PendingSession | undefined {
+    const ps = this.findBySessionId(sessionId);
+    if (ps) {
+      ps.status = 'connected';
+      ps.piPid = pid;
+      ps.lastNotifyAt = undefined; // 清除超时通知标记
+      console.log(`[Pending] ${ps.alias} → connected (pid=${pid})`);
+    }
+    return ps;
+  }
+  
+  // pi 断开时：标记为 inactive（自然断开，可复活）
+  markPendingInactive(sessionId: string): PendingSession | undefined {
+    const ps = this.findBySessionId(sessionId);
+    if (ps && ps.status !== 'killed') {
+      ps.status = 'inactive';
+      ps.piPid = undefined;
+      console.log(`[Pending] ${ps.alias} → inactive`);
+    }
+    return ps;
+  }
+  
+  // /kill 时：标记为 killed（终态，不接受连接、不自动启动）
+  markPendingKilled(sessionId: string): PendingSession | undefined {
+    const ps = this.findBySessionId(sessionId);
+    if (ps) {
+      ps.status = 'killed';
+      ps.piPid = undefined;
+      ps.lastNotifyAt = undefined;
+      console.log(`[Pending] ${ps.alias} → killed`);
+    }
+    return ps;
+  }
+  
+  // 超时：标记为 timeout
+  markPendingTimeout(alias: string): PendingSession | undefined {
+    const ps = this.pendingSessions.get(alias);
+    if (ps && (ps.status === 'pending' || ps.status === 'inactive')) {
+      ps.status = 'timeout';
+      console.log(`[Pending] ${alias} → timeout`);
+    }
+    return ps;
+  }
+  
+  // 杀掉 PendingSession 相关进程
+  killPendingSessionProcess(ps: PendingSession): void {
+    // 1. 杀 pi 进程
+    if (ps.piPid) {
+      try { process.kill(ps.piPid, 'SIGTERM'); } catch {}
+    } else {
+      // 没有 pid，通过 sessionId 查找
+      try {
+        const { execSync } = require('node:child_process');
+        const output = execSync(`ps aux | grep "pi --session-id ${ps.sessionId}" | grep -v grep | awk '{print $2}'`, { encoding: 'utf-8', timeout: 3000 });
+        const pids = output.trim().split('\n').filter(Boolean);
+        for (const pid of pids) {
+          try { process.kill(parseInt(pid), 'SIGTERM'); } catch {}
+        }
+      } catch {}
+    }
+    // 2. 清理可能残留的 pendingNewMessages
+    this.pendingNewMessages.delete(ps.sessionId);
+    const timer = this.pendingNewTimers.get(ps.sessionId);
+    if (timer) { clearTimeout(timer); this.pendingNewTimers.delete(ps.sessionId); }
+  }
+  
+  // 检查超时的 pending sessions，返回需要通知的列表
+  checkTimeoutPendingSessions(now: number): PendingSession[] {
+    const TIMEOUT_MS = 5 * 60 * 1000;  // 5 分钟
+    const NOTIFY_INTERVAL = 10 * 60 * 1000;  // 10 分钟内不重复通知
+    const needNotify: PendingSession[] = [];
+    
+    for (const ps of this.pendingSessions.values()) {
+      if (ps.status === 'pending' || ps.status === 'inactive') {
+        const elapsed = now - ps.createdAt;
+        if (elapsed > TIMEOUT_MS) {
+          // 标记为 timeout
+          ps.status = 'timeout';
+          // 检查是否需要通知（首次超时或距上次通知超过间隔）
+          if (!ps.lastNotifyAt || (now - ps.lastNotifyAt > NOTIFY_INTERVAL)) {
+            needNotify.push(ps);
+            ps.lastNotifyAt = now;
+          }
+        }
+      }
+    }
+    return needNotify;
+  }
+  
+  // 获取所有 pending sessions（用于 /sessions 等）
+  getPendingSessions(): PendingSession[] {
+    return Array.from(this.pendingSessions.values());
+  }
+  
+  // 序列化 pendingSessions 用于持久化
+  serializePendingSessions(): any[] {
+    return Array.from(this.pendingSessions.values()).map(ps => ({
+      ...ps,
+      // 不持久化 lastNotifyAt（重启后重新计时）
+      lastNotifyAt: undefined,
+    }));
+  }
+  
+  // 从持久化数据恢复 pendingSessions
+  restorePendingSessions(data: any[]): void {
+    for (const item of data) {
+      const ps: PendingSession = {
+        alias: item.alias,
+        sessionId: item.sessionId,
+        projectPath: item.projectPath,
+        status: item.status || 'pending',
+        createdAt: item.createdAt || Date.now(),
+        createdBy: item.createdBy || '',
+        initialMessage: item.initialMessage,
+        piPid: undefined,  // 重启后 pid 已无效
+        terminalPid: undefined,
+      };
+      // 重启后检查进程是否还活着
+      if (ps.status === 'connected' || ps.status === 'inactive') {
+        try {
+          const { execSync } = require('node:child_process');
+          execSync(`ps aux | grep "pi --session-id ${ps.sessionId}" | grep -v grep`, { encoding: 'utf-8', timeout: 3000 });
+          // 进程还在 → 保持 connected，等待重新 register
+          ps.status = 'inactive';
+        } catch {
+          // 进程已死
+          ps.status = 'inactive';
+        }
+      }
+      this.pendingSessions.set(ps.alias, ps);
+    }
+    console.log(`[Pending] 从磁盘恢复 ${this.pendingSessions.size} 个 pending sessions`);
   }
   
   // 按名称查找 cron 任务

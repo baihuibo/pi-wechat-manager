@@ -17,6 +17,7 @@ export const QUEUE_DIR = join(MANAGER_DIR, 'queue');
 export const MEDIA_DIR = join(MANAGER_DIR, 'media');
 export const PLIST_PATH = join(HOME, 'Library', 'LaunchAgents', 'com.pi.wechat-manager.plist');
 export const SESSION_REGISTRY_FILE = join(MANAGER_DIR, 'session-registry.json');
+export const PENDING_SESSIONS_FILE = join(MANAGER_DIR, 'pending-sessions.json');
 export const HTTP_PORT = 19087;
 export const DAEMON_VERSION = "2";
 
@@ -127,4 +128,20 @@ export function loadSessionRegistry(): Set<string> {
 export function saveSessionRegistry(registry: Set<string>) {
   ensureDirectories();
   writeFileSync(SESSION_REGISTRY_FILE, JSON.stringify([...registry], null, 2));
+}
+
+// 加载 Pending Sessions
+export function loadPendingSessions(): any[] {
+  if (existsSync(PENDING_SESSIONS_FILE)) {
+    try {
+      return JSON.parse(readFileSync(PENDING_SESSIONS_FILE, 'utf-8'));
+    } catch {}
+  }
+  return [];
+}
+
+// 保存 Pending Sessions
+export function savePendingSessions(pending: any[]) {
+  ensureDirectories();
+  writeFileSync(PENDING_SESSIONS_FILE, JSON.stringify(pending, null, 2));
 }

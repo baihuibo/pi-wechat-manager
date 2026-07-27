@@ -139,6 +139,22 @@ export class WechatBridge {
       this.sendText(message.userId, '👋 pi 已连接，直接发消息即可对话').catch(() => {});
     }
     
+    // 拦截「关闭 @别名」— 用户回复 daemon 的超时通知，不走 LLM
+    if (!isCommand) {
+      const closeMatch = text.match(/^关闭\s*@(\S+)/i) || text.match(/^确认关闭\s*@(\S+)/i);
+      if (closeMatch) {
+        const alias = closeMatch[1];
+        const ps = this.state.findByAlias(alias);
+        if (ps) {
+          console.log(`[微信] 收到关闭确认: @${alias}`);
+          this.state.killPendingSessionProcess(ps);
+          this.state.markPendingKilled(ps.sessionId);
+          await this.sendText(message.userId, `✅ 已关闭 @${alias}`);
+          return;
+        }
+      }
+    }
+    
     // 处理命令（以 / 开头）
     if (isCommand) {
       const [command, ...args] = text.slice(1).split(/\s+/);
@@ -151,13 +167,6 @@ export class WechatBridge {
     
     // 路由消息
     const targetSessionId = await this.routeMessage(message);
-    
-    // /new 创建中的 session，拒绝消息
-    if (targetSessionId === '__pending__') {
-      console.log('[微信] 目标 session 正在 /new 创建中，拒绝消息');
-      this.sendText(message.userId, '⏳ pi 尚未启动完成，请稍后再发消息').catch(() => {});
-      return;
-    }
     
     // @别名 指定了目标但找不到 → 提示用户，不 fallback
     if (targetSessionId === '__not_found__') {
@@ -227,6 +236,42 @@ export class WechatBridge {
       this.state.sendToSession(targetSessionId, 'wechat_message', messageData);
     } else {
       // ===== 启动追踪 + 防重复启动 =====
+
+      // 检查 PendingSession 状态
+      const ps = this.state.findBySessionId(targetSessionId);
+      
+      // killed：不自动启动
+      if (ps?.status === 'killed') {
+        console.log(`[微信] @${ps.alias} 已被关闭，不自动启动`);
+        this.state.enqueueMessage(targetSessionId, {
+          id: `msg_${Date.now()}`,
+          sessionId: targetSessionId,
+          userId: message.userId,
+          text: message.text,
+          images: messageData.images,
+          timestamp: Date.now(),
+          retries: 0,
+          expiresAt: 0,
+        });
+        return;
+      }
+      
+      // PendingSession 在等待连接中：只入队，不重复启动
+      if (ps && (ps.status === 'pending' || ps.status === 'timeout')) {
+        console.log(`[微信] @${ps.alias} 正在等待连接，入队消息（不重复启动）`);
+        this.state.enqueueMessage(targetSessionId, {
+          id: `msg_${Date.now()}`,
+          sessionId: targetSessionId,
+          userId: message.userId,
+          text: message.text,
+          images: messageData.images,
+          timestamp: Date.now(),
+          retries: 0,
+          expiresAt: 0,
+        });
+        this.sendText(message.userId, `⏳ @${ps.alias} 正在等待连接，消息已缓存`).catch(() => {});
+        return;
+      }
 
       // 检查是否正在启动中
       if (this.state.isStartupPending(targetSessionId)) {
@@ -392,25 +437,26 @@ export class WechatBridge {
       case 'status': {
         const status = this.getStatus();
         
-        // 获取别名映射
-        const aliases = await this.getAliases();
-        const sessionToAlias = new Map<string, string>();
-        for (const [alias, sessionId] of Object.entries(aliases)) {
-          sessionToAlias.set(sessionId, alias);
-        }
-        
         // 获取活跃 session 列表
         const activeSessions = Array.from(this.state.connections.entries())
           .filter(([_, conn]) => conn.socket.writable)
           .map(([id, _]) => id);
         
+        // 默认 session 的显示名（优先 PendingSession alias，其次 aliases.json）
         const defaultSession = this.state.defaultSessionId;
-        const defaultAlias = defaultSession ? sessionToAlias.get(defaultSession) : null;
-        const defaultDisplayName = defaultAlias
-          ? `@${defaultAlias}`
-          : defaultSession
-            ? defaultSession.slice(0, 8) + '...'
-            : '无';
+        let defaultDisplayName = '无';
+        if (defaultSession) {
+          const ps = this.state.findBySessionId(defaultSession);
+          if (ps) {
+            defaultDisplayName = `@${ps.alias}`;
+          } else {
+            const aliases = await this.getAliases();
+            for (const [alias, sid] of Object.entries(aliases)) {
+              if (sid === defaultSession) { defaultDisplayName = `@${alias}`; break; }
+            }
+            if (defaultDisplayName === '无') defaultDisplayName = defaultSession.slice(0, 8) + '...';
+          }
+        }
         
         // 获取定时任务列表
         const cronTasks = this.state.getCronTasks();
@@ -420,16 +466,23 @@ export class WechatBridge {
         statusText += `- 当前：${defaultDisplayName}\n`;
         statusText += `- 活跃 pi：${activeSessions.length} 个\n`;
         
+        // pending sessions 统计
+        const pendingList = this.state.getPendingSessions();
+        const pendingCount = pendingList.filter(ps => ps.status === 'pending' || ps.status === 'timeout').length;
+        if (pendingCount > 0) {
+          statusText += `- 等待连接：${pendingCount} 个\n`;
+        }
+        
         if (activeSessions.length > 0) {
           statusText += `\n**活跃 Sessions：**\n`;
           for (const id of activeSessions) {
             const isDefault = id === defaultSession;
             const marker = isDefault ? '→' : ' ';
             const conn = this.state.connections.get(id);
-            const alias = sessionToAlias.get(id);
-            const displayName = (alias || conn?.name)
-              ? `@${alias || conn?.name}`
-              : `${id.slice(0, 8)}...`;
+            const ps = this.state.findBySessionId(id);
+            const displayName = ps ? `@${ps.alias}` :
+                               conn?.name ? `@${conn.name}` :
+                               `${id.slice(0, 8)}...`;
             statusText += `${marker} ${displayName}${isDefault ? ' (默认)' : ''}\n`;
           }
         }
@@ -447,77 +500,120 @@ export class WechatBridge {
       
       case 'sessions': {
         const { listSessions } = await import('./session-discover.js');
-
-        const sessions = listSessions();
-        if (sessions.length === 0) {
+        const diskSessions = listSessions();
+        const pendingList = this.state.getPendingSessions();
+        
+        // 获取别名映射
+        const aliases = await this.getAliases();
+        
+        // 构建统一列表项
+        interface UnifiedItem {
+          id: string;
+          displayName: string;
+          status: string;      // 状态图标
+          summary: string;
+          time: string;
+          sortKey: number;     // 排序权重：0=connected, 1=pending/timeout, 2=inactive, 3=killed
+        }
+        
+        const items: UnifiedItem[] = [];
+        const seenIds = new Set<string>();
+        
+        // 1. 磁盘 sessions
+        for (const s of diskSessions) {
+          const conn = this.state.connections.get(s.id);
+          const isActive = conn?.socket.writable;
+          const ps = this.state.findBySessionId(s.id);
+          
+          const alias = aliases[s.id] || ps?.alias || s.name;
+          const displayName = alias ? `@${alias}` : s.id.slice(0, 8);
+          
+          // 状态：优先 PendingSession 的状态
+          let status: string;
+          let sortKey: number;
+          if (ps) {
+            switch (ps.status) {
+              case 'connected': status = '🟢'; sortKey = 0; break;
+              case 'pending': case 'timeout': status = ps.status === 'timeout' ? '⏰' : '⏳'; sortKey = 1; break;
+              case 'inactive': status = '⚪'; sortKey = 2; break;
+              case 'killed': status = '🛑'; sortKey = 3; break;
+              default: status = '⚪'; sortKey = 2;
+            }
+          } else {
+            status = isActive ? '🟢' : '⚪';
+            sortKey = isActive ? 0 : 2;
+          }
+          
+          // 摘要
+          let summary = '';
+          if (ps?.initialMessage) {
+            summary = ps.initialMessage.slice(0, 24);
+          } else if (s.lastMessage) {
+            const clean = s.lastMessage.replace(/\n/g, ' ').trim();
+            summary = clean.length <= 24 ? clean : clean.slice(0, 24) + '…';
+          } else {
+            summary = s.messageCount > 0 ? '(无文字)' : '(空)';
+          }
+          
+          // 时间
+          const diff = Date.now() - s.modified.getTime();
+          let time: string;
+          if (diff < 60000) time = '刚刚';
+          else if (diff < 3600000) time = `${Math.floor(diff / 60000)} 分钟前`;
+          else {
+            const now = new Date();
+            const isToday = now.toDateString() === s.modified.toDateString();
+            const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+            const isYesterday = yesterday.toDateString() === s.modified.toDateString();
+            const hm = s.modified.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            if (isToday) time = hm;
+            else if (isYesterday) time = `昨天 ${hm}`;
+            else time = `${s.modified.getMonth() + 1}/${s.modified.getDate()} ${hm}`;
+          }
+          
+          items.push({ id: s.id, displayName, status, summary, time, sortKey });
+          seenIds.add(s.id);
+        }
+        
+        // 2. PendingSessions 中没有磁盘记录的
+        for (const ps of pendingList) {
+          if (seenIds.has(ps.sessionId)) continue;
+          
+          const statusIcon = ps.status === 'connected' ? '🟢' :
+                             ps.status === 'pending' ? '⏳' :
+                             ps.status === 'inactive' ? '⚪' :
+                             ps.status === 'timeout' ? '⏰' : '🛑';
+          const sortKey = ps.status === 'connected' ? 0 :
+                          ps.status === 'pending' || ps.status === 'timeout' ? 1 :
+                          ps.status === 'inactive' ? 2 : 3;
+          
+          items.push({
+            id: ps.sessionId,
+            displayName: `@${ps.alias}`,
+            status: statusIcon,
+            summary: ps.initialMessage?.slice(0, 24) || '',
+            time: '刚创建',
+            sortKey,
+          });
+        }
+        
+        if (items.length === 0) {
           await this.sendText(userId, '❌ 没有找到 session');
           break;
         }
-
-        // 获取别名映射
-        const aliases = await this.getAliases();
-        const sessionToAlias = new Map<string, string>();
-        for (const [alias, sessionId] of Object.entries(aliases)) {
-          sessionToAlias.set(sessionId, alias);
-        }
-
-        // 排序：活跃的在前，再按修改时间倒序
-        const sorted = [...sessions].sort((a: any, b: any) => {
-          const aActive = this.state.connections.has(a.id);
-          const bActive = this.state.connections.has(b.id);
-          if (aActive && !bActive) return -1;
-          if (!aActive && bActive) return 1;
-          return b.modified.getTime() - a.modified.getTime();
-        });
-
-        // 智能时间格式化
-        const fmtTime = (date: Date): string => {
-          const now = new Date();
-          const diff = now.getTime() - date.getTime();
-          if (diff < 60000) return '刚刚';
-          if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
-
-          const isToday = now.toDateString() === date.toDateString();
-          const yesterday = new Date(now);
-          yesterday.setDate(yesterday.getDate() - 1);
-          const isYesterday = yesterday.toDateString() === date.toDateString();
-
-          const hm = date.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-          if (isToday) return hm;
-          if (isYesterday) return `昨天 ${hm}`;
-          return `${date.getMonth() + 1}/${date.getDate()} ${hm}`;
-        };
-
-        // 取最后消息做摘要（去换行、限长度）
-        const getSummary = (s: any): string => {
-          if (!s.lastMessage) return s.messageCount > 0 ? '(无文字)' : '(空)';
-          // 去换行，截断到 20 个中文字符/40 个英文
-          const clean = s.lastMessage.replace(/\n/g, ' ').trim();
-          if (clean.length <= 24) return clean;
-          return clean.slice(0, 24) + '…';
-        };
-
-        const total = sessions.length;
-        const displayCount = Math.min(10, sorted.length);
-        const header = total > displayCount
-          ? `**📋 Sessions（${total} 个，显示前 ${displayCount} 个）**`
+        
+        // 排序 + 限制数量
+        items.sort((a, b) => a.sortKey - b.sortKey);
+        const displayItems = items.slice(0, 10);
+        
+        const total = items.length;
+        const header = total > 10
+          ? `**📋 Sessions（${total} 个，显示前 10 个）**`
           : `**📋 Sessions（${total} 个）**`;
-
-        const lines = sorted.slice(0, displayCount).map((s: any) => {
-          const isActive = this.state.connections.has(s.id);
-          const status = isActive ? '🟢' : '⚪';
-          const summary = getSummary(s);
-          const time = fmtTime(s.modified);
-
-          // 别名 或 pi --name 都显示为 @名称；否则显示短 ID
-          const alias = sessionToAlias.get(s.id);
-          const displayName = (alias || s.name)
-            ? `@${alias || s.name}`
-            : s.id.slice(0, 8);
-
-          return `- ${status} ${displayName}  ${summary}  ${time}`;
-        });
-
+        const lines = displayItems.map(item =>
+          `- ${item.status} ${item.displayName}  ${item.summary}  ${item.time}`
+        );
+        
         await this.sendText(userId, `${header}\n\n${lines.join('\n')}\n\n💡 使用 /switch <id> 切换 session`);
         break;
       }
@@ -566,8 +662,7 @@ export class WechatBridge {
       }
       
       case 'new': {
-        // 创建新 session + 打开 Ghostty
-        const { spawn } = await import('node:child_process');
+        // 创建新 session + 打开终端
         const { homedir } = await import('node:os');
         
         // 解析参数：/new [别名] [/path/to/project] [消息]
@@ -577,8 +672,6 @@ export class WechatBridge {
         
         if (args) {
           const parts = args.split(/\s+/);
-          
-          // 解析参数：/new [/path] [名称] [消息]
           let i = 0;
           
           // 1. 检查是否有路径
@@ -587,51 +680,40 @@ export class WechatBridge {
             i++;
           }
           
-          // 2. 剩余参数：第一个是名称（如果有多个），其他是消息
+          // 2. 剩余参数：第一个是名称，其他是消息
           const remaining = parts.slice(i);
           if (remaining.length === 0) {
-            // 没有参数，默认消息
             message = '来自微信';
           } else if (remaining.length === 1) {
-            // 只有一个参数，是消息
             message = remaining[0];
           } else {
-            // 多个参数：第一个是名称，其他是消息
             aliasName = remaining[0];
             message = remaining.slice(1).join(' ');
           }
         } else {
           message = '来自微信';
         }
+        if (!message) message = '来自微信';
         
-        // 如果没有消息，使用默认消息
-        if (!message) {
-          message = '来自微信';
-        }
+        const sessionId = `wechat-${Date.now()}`;
+        const alias = aliasName || sessionId;
         
-        // 创建启动脚本到临时目录
-        const { writeFileSync, chmodSync } = await import('node:fs');
-        const { join } = await import('node:path');
-        const { tmpdir } = await import('node:os');
-        const sessionName = aliasName || `wechat-${Date.now()}`;
-        const scriptPath = join(tmpdir(), `pi-new-${sessionName}.sh`);
+        console.log(`[微信] /new alias=${alias}, sessionId=${sessionId.slice(0,8)}, projectPath=${projectPath}`);
         
-        const scriptContent = `#!/bin/bash\ncd "${projectPath}" || { echo "目录不存在: ${projectPath}"; read; exit 1; }\npi --session-id "${sessionName}" --approve 2>&1 || { echo "pi 启动失败"; read; }\nrm -- "$0" 2>/dev/null\n`;
-        writeFileSync(scriptPath, scriptContent, 'utf-8');
-        chmodSync(scriptPath, '755');
+        // 创建 PendingSession
+        this.state.createPendingSession({
+          alias,
+          sessionId,
+          projectPath,
+          createdBy: userId,
+          initialMessage: message,
+        });
         
-        console.log(`[微信] 启动脚本: ${scriptPath}`);
-        console.log(`[微信] 脚本内容:\n${scriptContent}`);
-        
-        // 消息入队，key 为 sessionName（pi 用 --session-id 启动，register 时精确匹配）
-        const pendingKey = sessionName;
-        if (!this.state.pendingNewMessages.has(pendingKey)) {
-          this.state.pendingNewMessages.set(pendingKey, []);
-        }
-        this.state.pendingNewMessages.get(pendingKey)!.push({
+        // 入队初始消息（pi 连接后自动投递）
+        this.state.enqueueMessage(sessionId, {
           id: `msg_${Date.now()}`,
-          sessionId: '__pending__',
-          userId: userId,
+          sessionId,
+          userId,
           text: message,
           images: [],
           timestamp: Date.now(),
@@ -639,23 +721,68 @@ export class WechatBridge {
           expiresAt: 0,
         });
         
+        // 注册别名 → sessionId 映射
+        await this.setAlias(alias, sessionId);
+        
+        // 设置默认 session
+        this.state.defaultSessionId = sessionId;
+        
+        // 创建启动脚本（cd 到 $HOME 避免 TCC 权限弹窗，pi 用 --session-id 关联）
+        const { writeFileSync, chmodSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const { tmpdir } = await import('node:os');
+        const scriptPath = join(tmpdir(), `pi-new-${alias}.sh`);
+        
+        const errorLog = join(tmpdir(), `pi-new-${alias}.log`);
+        const scriptContent = `#!/bin/bash\n` +
+          `cd "${homedir()}" || exit 1\n` +
+          `echo "启动 pi: ${alias}" >> "${errorLog}"\n` +
+          `pi --session-id "${sessionId}" --name "${alias}" --approve 2>>"${errorLog}" || {\n` +
+          `  echo "pi 启动失败，日志: ${errorLog}"\n` +
+          `  sleep 5\n` +
+          `}\n` +
+          `rm -- "$0" 2>/dev/null\n`;
+        writeFileSync(scriptPath, scriptContent, 'utf-8');
+        chmodSync(scriptPath, '755');
+        
+        console.log(`[微信] 启动脚本: ${scriptPath}`);
+        console.log(`[微信] 脚本内容:\n${scriptContent}`);
+        
         // 启动终端 + pi
         await this.sendText(userId, '⏳ 正在准备启动脚本...');
         const child = await this.spawnTerminal(scriptPath);
         child.unref();
         
-        await this.sendText(userId, '⏳ 终端已打开，等待 pi 连接...');
+        await this.sendText(userId, `⏳ 终端已打开，等待 pi 连接...`);
         
-        // 等待 pi 连接（15s 超时，与自动唤起一致）
-        const connected = await this.waitForPiConnect(pendingKey, 15_000);
+        // 分阶段等待（15s → 30s → 60s），每阶段给反馈
+        const stages = [
+          { ms: 15_000, msg: null },
+          { ms: 30_000, msg: `⏰ @${alias} 已等待 30s，仍在连接中...` },
+          { ms: 60_000, msg: `⏰ @${alias} 已等待 1 分钟，可能是权限弹窗或黑屏导致。` },
+        ];
+        
+        let connected = false;
+        for (const stage of stages) {
+          connected = await this.waitForPiConnect(sessionId, stage.ms);
+          if (connected) break;
+          // 已经连上了就不发提示
+          if (!connected) {
+            const ps = this.state.findByAlias(alias);
+            if (ps?.status === 'connected') { connected = true; break; }
+            if (stage.msg) await this.sendText(userId, stage.msg).catch(() => {});
+          }
+        }
         
         if (connected) {
-          console.log(`[微信] /new pi 已连接: ${pendingKey}`);
-          // 消息已由 daemon register handler 投递
+          console.log(`[微信] /new pi 已连接: ${alias}`);
         } else {
-          this.state.pendingNewMessages.delete(pendingKey);
-          console.log(`[微信] /new 超时: ${pendingKey}`);
-          this.sendText(userId, `⏰ 创建 pi 超时（15s），请检查终端窗口`).catch(() => {});
+          console.log(`[微信] /new 超时但保留 pending: ${alias}`);
+          await this.sendText(userId, 
+            `⏰ @${alias} 已超过 1 分钟未连接\n\n` +
+            `可能原因：终端未打开、权限弹窗、或屏幕黑屏\n` +
+            `连接后消息会自动投递。回复「关闭 @${alias}」来取消`
+          ).catch(() => {});
         }
         break;
       }
@@ -680,7 +807,9 @@ export class WechatBridge {
         if (conn?.socket.writable) {
           this.state.sendToSession(targetSessionId, 'wechat_command', { command: 'reset', userId });
         } else {
-          await this.sendText(userId, `❌ session ${targetSessionId.slice(0, 8)}... 未连接`);
+          const ps = this.state.findBySessionId(targetSessionId);
+          const name = ps ? `@${ps.alias}` : `${targetSessionId.slice(0, 8)}...`;
+          await this.sendText(userId, `⏳ ${name} 尚未连接，无法执行 /reset`);
         }
         break;
       }
@@ -703,7 +832,9 @@ export class WechatBridge {
         // 检查连接是否存在
         const stopConn = this.state.connections.get(targetSessionId);
         if (!stopConn?.socket.writable) {
-          await this.sendText(userId, `❌ session ${targetSessionId.slice(0, 8)}... 未连接`);
+          const _ps = this.state.findBySessionId(targetSessionId);
+          const name = _ps ? `@${_ps.alias}` : `${targetSessionId.slice(0, 8)}...`;
+          await this.sendText(userId, `⏳ ${name} 尚未连接，无法执行 /stop`);
           break;
         }
         
@@ -714,11 +845,19 @@ export class WechatBridge {
       case 'kill': {
         // 强制终止 pi 进程（支持 /kill 或 /kill <name|id>）
         let targetSessionId = this.state.defaultSessionId;
+        let targetAlias = '';
         
         if (args) {
-          // 通过别名或 ID 查找
-          const aliases = await this.getAliases();
-          targetSessionId = aliases[args] || await this.findSessionById(args);
+          // 先通过别名查找 PendingSession
+          const ps = this.state.findByAlias(args);
+          if (ps) {
+            targetSessionId = ps.sessionId;
+            targetAlias = ps.alias;
+          } else {
+            // 通过别名或 ID 查找
+            const aliases = await this.getAliases();
+            targetSessionId = aliases[args] || await this.findSessionById(args);
+          }
         }
         
         if (!targetSessionId) {
@@ -726,34 +865,35 @@ export class WechatBridge {
           break;
         }
         
-        const conn = this.state.connections.get(targetSessionId);
-        if (!conn) {
-          await this.sendText(userId, `❌ session ${targetSessionId.slice(0, 8)}... 未连接`);
-          break;
+        // 找到对应的 PendingSession 并标记为 killed
+        const ps = this.state.findBySessionId(targetSessionId);
+        if (ps) {
+          this.state.killPendingSessionProcess(ps);
+          this.state.markPendingKilled(targetSessionId);
         }
         
-        try {
-          process.kill(conn.pid, 'SIGTERM');
-          
-          // 切换到其他活跃 session，避免自动重启
-          const isDefault = targetSessionId === this.state.defaultSessionId;
-          if (isDefault) {
-            // 找其他活跃 session
-            const otherSession = Array.from(this.state.connections.entries())
-              .find(([id, c]) => id !== targetSessionId && c.socket.writable);
-            
-            if (otherSession) {
-              this.state.defaultSessionId = otherSession[0];
-              await this.sendText(userId, `🛑 已终止 ${targetSessionId.slice(0, 8)}...，已切换到 ${otherSession[0].slice(0, 8)}...`);
-            } else {
-              this.state.defaultSessionId = null;
-              await this.sendText(userId, `🛑 已终止 ${targetSessionId.slice(0, 8)}...，无其他活跃 session`);
-            }
+        // 同时尝试 kill 已连接的 pi 进程
+        const conn = this.state.connections.get(targetSessionId);
+        if (conn) {
+          try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+        }
+        
+        const displayName = targetAlias || ps?.alias || targetSessionId.slice(0, 8);
+        
+        // 切换到其他活跃 session
+        const isDefault = targetSessionId === this.state.defaultSessionId;
+        if (isDefault) {
+          const otherSession = Array.from(this.state.connections.entries())
+            .find(([id, c]) => id !== targetSessionId && c.socket.writable);
+          if (otherSession) {
+            this.state.defaultSessionId = otherSession[0];
+            await this.sendText(userId, `🛑 已终止 ${displayName}，已切换到 ${otherSession[0].slice(0, 8)}...`);
           } else {
-            await this.sendText(userId, `🛑 已终止 ${targetSessionId.slice(0, 8)}...`);
+            this.state.defaultSessionId = null;
+            await this.sendText(userId, `🛑 已终止 ${displayName}，无其他活跃 session`);
           }
-        } catch (e: any) {
-          await this.sendText(userId, `❌ 终止失败: ${e.message}`);
+        } else {
+          await this.sendText(userId, `🛑 已终止 ${displayName}`);
         }
         break;
       }
@@ -776,7 +916,9 @@ export class WechatBridge {
         // 读取进度信息（从连接信息中获取）
         const conn = this.state.connections.get(targetSessionId);
         if (!conn) {
-          await this.sendText(userId, `❌ session ${targetSessionId.slice(0, 8)}... 未连接`);
+          const _ps2 = this.state.findBySessionId(targetSessionId);
+          const name = _ps2 ? `@${_ps2.alias}` : `${targetSessionId.slice(0, 8)}...`;
+          await this.sendText(userId, `⏳ ${name} 尚未连接，无法查看进度`);
           break;
         }
         
@@ -889,29 +1031,43 @@ export class WechatBridge {
       }
       
       case 'switch': {
-        // 切换 session（支持 ID、短 ID、名称）
+        // 切换 session（支持 ID、短 ID、名称、pending 别名）
+        if (!args) {
+          await this.sendText(userId, '❌ 请指定 session id、名称或别名\n\n用法: /switch <id 或 @别名>');
+          break;
+        }
+        
+        const target = args.replace(/^@/, '');
+        
+        // 1. 先查 PendingSession
+        const ps = this.state.findByAlias(target);
+        if (ps) {
+          this.state.defaultSessionId = ps.sessionId;
+          const statusText = ps.status === 'connected' ? '🟢 已连接' :
+                             ps.status === 'pending' ? '⏳ 等待连接中' :
+                             ps.status === 'inactive' ? '⚪ 未连接（可复活）' :
+                             ps.status === 'timeout' ? '⏰ 超时未连接' :
+                             ps.status === 'killed' ? '🛑 已关闭' : '⚪';
+          await this.sendText(userId, `✅ 已切换到 @${ps.alias} ${statusText}`);
+          if (ps.status === 'pending' || ps.status === 'timeout') {
+            await this.sendText(userId, '💡 pi 尚未连接，连接后消息自动投递');
+          }
+          break;
+        }
+        
+        // 2. 再查现有 sessions
         const { listSessions } = await import('./session-discover.js');
         const sessions = listSessions();
-        
-        if (!args) {
-          await this.sendText(userId, '❌ 请指定 session id 或名称\n\n用法: /switch <session-id 或名称>');
-          break;
-        }
-        
-        // 优先通过 ID 或短 ID 查找
-        let targetSession = sessions.find(s => s.id.startsWith(args));
-        
-        // 如果没找到，通过名称查找
+        let targetSession = sessions.find(s => s.id.startsWith(target));
         if (!targetSession) {
-          targetSession = sessions.find(s => s.name && s.name.toLowerCase().includes(args.toLowerCase()));
+          targetSession = sessions.find(s => s.name && s.name.toLowerCase().includes(target.toLowerCase()));
         }
         
         if (!targetSession) {
-          await this.sendText(userId, `❌ 未找到 session: ${args}`);
+          await this.sendText(userId, `❌ 未找到 session: ${target}`);
           break;
         }
         
-        // 检查目标 session 是否有 pi 连接
         const conn = this.state.connections.get(targetSession.id);
         const isActive = conn?.socket.writable;
         
@@ -962,14 +1118,18 @@ export class WechatBridge {
       return id;
     }
     
-    // 2. 检查是否是短 ID（前缀匹配）
+    // 2. 检查 PendingSession 的 sessionId
+    const ps = this.state.findBySessionId(id);
+    if (ps) return ps.sessionId;
+    
+    // 3. 检查是否是短 ID（前缀匹配）
     for (const connId of this.state.connections.keys()) {
       if (connId.startsWith(id)) {
         return connId;
       }
     }
     
-    // 3. 通过 name 查找
+    // 4. 通过 name 查找
     const { listSessions } = await import('./session-discover.js');
     const sessions = listSessions();
     const session = sessions.find((s: any) => s.name && s.name.toLowerCase().includes(id.toLowerCase()));
@@ -1019,10 +1179,21 @@ export class WechatBridge {
           return matchedSession.id;
         }
         
-        // 3. 检查是否正在 /new 创建中（pendingNewMessages 里的 key 即为 --session-id）
-        if (this.state.pendingNewMessages.has(target)) {
-          console.log(`[微信] @${target} 正在 /new 创建中，拒绝消息`);
-          return '__pending__';
+        // 3. 检查是否在 PendingSession 中（通过 /new 创建，尚未连接）
+        const ps = this.state.findByAlias(target);
+        if (ps && (ps.status === 'pending' || ps.status === 'timeout')) {
+          console.log(`[微信] @${target} 在 pending 中，入队消息`);
+          this.state.enqueueMessage(ps.sessionId, {
+            id: `msg_${Date.now()}`,
+            sessionId: ps.sessionId,
+            userId: message.userId,
+            text: message.text,
+            images: [],
+            timestamp: Date.now(),
+            retries: 0,
+            expiresAt: 0,
+          });
+          return ps.sessionId;  // 返回 sessionId，后续自动启动检查会处理
         }
         
         // @mention 明确指定了目标但找不到 → 不 fallback，直接返回未找到
@@ -1081,14 +1252,16 @@ export class WechatBridge {
     // 检测 Ghostty
     try {
       execSync('ls /Applications/Ghostty.app > /dev/null 2>&1');
+      console.log(`[微信] 使用 Ghostty 打开终端`);
       return spawn('open', ['-na', 'Ghostty.app', '--args', '-e', scriptPath], { detached: true, stdio: 'ignore' });
     } catch {}
     
     // 回退 Terminal.app
+    console.log(`[微信] 使用 Terminal.app 打开终端`);
     return spawn('open', ['-a', 'Terminal.app', scriptPath], { detached: true, stdio: 'ignore' });
   }
   
-  // 自动启动 pi session（复用 spawnTerminal，自动检测 Ghostty / Terminal.app）
+  // 自动启动 pi session（复用 spawnTerminal）
   private async spawnPiSession(sessionId: string): Promise<boolean> {
     try {
       // 获取 session 的 cwd
@@ -1096,20 +1269,28 @@ export class WechatBridge {
       const session = getSession(sessionId);
       const cwd = session?.cwd || process.env.HOME || '/tmp';
       
-      console.log(`[微信] 启动 pi: session=${sessionId.slice(0, 8)}, cwd=${cwd}`);
+      console.log(`[微信] 自动启动 pi: session=${sessionId.slice(0, 8)}, cwd=${cwd}`);
       
-      // 创建启动脚本到临时目录
+      // 创建启动脚本（cd 到 $HOME 避免 TCC 权限弹窗）
       const { writeFileSync, chmodSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
       const scriptPath = join(tmpdir(), `pi-start-${sessionId.slice(0, 8)}.sh`);
-      const scriptContent = `#!/bin/bash\ncd "${cwd}" || { echo "目录不存在: ${cwd}"; read; exit 1; }\npi --session-id "${sessionId}" --approve 2>&1 || { echo "pi 启动失败"; read; }\nrm -- "$0" 2>/dev/null\n`;
+      const errorLog = join(tmpdir(), `pi-start-${sessionId.slice(0, 8)}.log`);
+      const { homedir } = await import('node:os');
+      const scriptContent = `#!/bin/bash\n` +
+        `cd "${homedir()}" || exit 1\n` +
+        `echo "自动启动 pi: ${sessionId.slice(0,8)}" >> "${errorLog}"\n` +
+        `pi --session-id "${sessionId}" --approve 2>>"${errorLog}" || {\n` +
+        `  echo "pi 启动失败，日志: ${errorLog}"\n` +
+        `  sleep 5\n` +
+        `}\n` +
+        `rm -- "$0" 2>/dev/null\n`;
       writeFileSync(scriptPath, scriptContent, 'utf-8');
       chmodSync(scriptPath, '755');
       
       console.log(`[微信] 启动脚本: ${scriptPath}`);
       
-      // 复用 spawnTerminal（自动检测 Ghostty，回退 Terminal.app）
       const child = await this.spawnTerminal(scriptPath);
       child.unref();
       

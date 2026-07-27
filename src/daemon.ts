@@ -55,6 +55,20 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       
       state.register(sessionId, pid, cwd, socket, name);
       
+      // 对接 PendingSession：通过 name 或 sessionId 匹配
+      const ps = state.matchAndConnect(sessionId, pid, name);
+      if (ps && isNew) {
+        state.defaultSessionId = sessionId;
+        console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
+        
+        // 更新 aliases.json 指向真实 sessionId
+        const aliases = loadAliases();
+        if (aliases[ps.alias] !== sessionId) {
+          aliases[ps.alias] = sessionId;
+          saveAliases(aliases);
+        }
+      }
+      
       // 如果 pi 有 --name，自动注册为别名
       if (name && typeof name === 'string' && name.trim()) {
         const aliases = loadAliases();
@@ -86,12 +100,6 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
         const timer = state.pendingNewTimers.get(sessionId);
         if (timer) { clearTimeout(timer); state.pendingNewTimers.delete(sessionId); }
         
-        // 只有注册表里没有的 sessionId 才视为新 pi
-        if (isNew) {
-          state.defaultSessionId = sessionId;
-          console.log(`[状态] 新 pi 已连接，设置为默认 session: ${sessionId}`);
-        }
-        
         console.log(`[状态] 投递 ${pendingMessages.length} 条 /new 消息给 ${sessionId.slice(0,8)}`);
         for (const msg of pendingMessages) {
           state.enqueueMessage(sessionId, { ...msg, sessionId });
@@ -117,6 +125,8 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
     
     case 'unregister': {
       state.unregister(params.sessionId);
+      // 对接 PendingSession：标记为 inactive
+      state.markPendingInactive(params.sessionId);
       respond({ ok: true });
       break;
     }
@@ -570,6 +580,24 @@ function startHeartbeatChecker(): void {
   setInterval(() => {
     state.cleanupStaleConnections(config.heartbeatTimeoutMs);
     state.cleanupExpiredMessages();
+    
+    // 持久化 pending sessions
+    import('./config.js').then(({ savePendingSessions }) => {
+      savePendingSessions(state.serializePendingSessions());
+    }).catch(() => {});
+    
+    // 检查 pending sessions 超时
+    const timeouts = state.checkTimeoutPendingSessions(Date.now());
+    for (const ps of timeouts) {
+      const userId = state.wechat.userId || ps.createdBy;
+      const elapsed = Math.floor((Date.now() - ps.createdAt) / 60000);
+      console.log(`[Pending] ${ps.alias} 超时未连接（${elapsed}分钟），通知用户`);
+      wechatBridge.sendText(
+        userId,
+        `⏰ @${ps.alias} 已等待 ${elapsed} 分钟未连接到 pi\n\n` +
+        `回复「关闭 @${ps.alias}」来关闭此线程`
+      ).catch(() => {});
+    }
   }, config.heartbeatIntervalMs);
 }
 
@@ -679,6 +707,13 @@ async function start(): Promise<void> {
   state.sessionRegistry = loadSessionRegistry();
   console.log(`[注册表] 已加载 ${state.sessionRegistry.size} 个已知 session`);
   
+  // 加载持久化的 pending sessions
+  const { loadPendingSessions, savePendingSessions } = await import('./config.js');
+  const savedPending = loadPendingSessions();
+  if (savedPending.length > 0) {
+    state.restorePendingSessions(savedPending);
+  }
+  
   // 启动服务器
   startSocketServer();
   startHttpServer();
@@ -705,17 +740,20 @@ async function start(): Promise<void> {
   // 优雅退出
   process.on('SIGINT', () => {
     console.log('\n[守护进程] 收到 SIGINT，正在关闭...');
+    savePendingSessions(state.serializePendingSessions());
     cleanup();
     process.exit(0);
   });
   
   process.on('SIGTERM', () => {
     console.log('\n[守护进程] 收到 SIGTERM，正在关闭...');
+    savePendingSessions(state.serializePendingSessions());
     cleanup();
     process.exit(0);
   });
   
   process.on('exit', () => {
+    savePendingSessions(state.serializePendingSessions());
     cleanup();
   });
 }
