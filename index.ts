@@ -518,6 +518,7 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
       name: sessionName || undefined,
     }) as any;
     
+    // 与 daemon 默认 heartbeatIntervalMs 对齐：60s 一次；约 30 次未达才判死
     heartbeatTimer = setInterval(async () => {
       try {
         await socketClient?.request('heartbeat', { sessionId });
@@ -532,7 +533,7 @@ async function connectToDaemon(ctx?: Ctx): Promise<boolean> {
         }
         if (ctx) updateStatusBar(ctx);
       }
-    }, 30000);
+    }, 60_000);
     
     if (result.wechat?.loggedIn && result.wechat?.connected) {
       currentState = WechatState.WECHAT_CONNECTED;

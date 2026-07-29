@@ -613,31 +613,65 @@ export class DaemonState {
     this.wechat.userId = undefined;
   }
   
-  // 清理失效连接（心跳超时）
-  cleanupStaleConnections(timeoutMs: number): string[] {
+  /**
+   * 清理心跳超时的连接。
+   * - 手动 CLI（不在 managedSpawns）：只断连/注销，不杀进程
+   * - manager 拉起的托管 session：终止进程并返回 killed，供上层微信通知
+   */
+  cleanupStaleConnections(timeoutMs: number): {
+    disconnected: string[];
+    killed: Array<{ sessionId: string; userId?: string; alias?: string; missedMs: number }>;
+  } {
     const now = Date.now();
-    const stale: string[] = [];
-    
+    const disconnected: string[] = [];
+    const killed: Array<{ sessionId: string; userId?: string; alias?: string; missedMs: number }> = [];
+
     for (const [id, conn] of this.connections) {
-      if (now - conn.lastHeartbeat.getTime() > timeoutMs) {
-        stale.push(id);
-        // 杀掉卡死的 pi 进程（GUI 窗口随进程退出；rpc 后台一并清 stdin）
-        const managed = this.managedSpawns.get(id);
-        if (managed?.mode === 'background') {
-          killBackgroundChild(id, managed.childPid ?? conn.pid);
-        } else {
-          try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+      const missedMs = now - conn.lastHeartbeat.getTime();
+      if (missedMs <= timeoutMs) continue;
+
+      const managed = this.managedSpawns.get(id);
+      const ps = this.findBySessionId(id);
+      const alias = ps?.alias ?? conn.name;
+      const short = id.slice(0, 8);
+
+      if (!managed) {
+        // 用户本地手动启动的 pi：只摘掉 socket 登记，绝不 SIGTERM
+        console.log(
+          `[状态] Session ${short} 心跳超时 ${Math.floor(missedMs / 60000)} 分钟（手动 CLI），仅断开连接，保留进程`,
+        );
+        try { conn.socket.destroy(); } catch {}
+        this.unregister(id);
+        this.markPendingInactive(id);
+        disconnected.push(id);
+        continue;
+      }
+
+      // 托管 session：终止进程
+      console.log(
+        `[状态] Session ${short} 心跳超时 ${Math.floor(missedMs / 60000)} 分钟，终止托管进程（mode=${managed.mode}）`,
+      );
+      if (managed.mode === 'background') {
+        killBackgroundChild(id, managed.childPid ?? conn.pid);
+      } else {
+        try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+        if (managed.childPid && managed.childPid !== conn.pid) {
+          try { process.kill(managed.childPid, 'SIGTERM'); } catch {}
         }
       }
-    }
-    
-    for (const id of stale) {
-      console.log(`[状态] Session ${id} 心跳超时，已终止进程并断开连接`);
+      try { conn.socket.destroy(); } catch {}
       this.unregister(id);
+      this.markPendingInactive(id);
       this.managedSpawns.delete(id);
+      killed.push({
+        sessionId: id,
+        userId: managed.userId ?? ps?.createdBy,
+        alias,
+        missedMs,
+      });
     }
-    
-    return stale;
+
+    return { disconnected, killed };
   }
   
   // ===== Pending Sessions =====

@@ -652,8 +652,8 @@ pi 会调用 `send_file_to_wechat` 工具。
 ```json
 {
   "httpPort": 19087,
-  "heartbeatIntervalMs": 30000,
-  "heartbeatTimeoutMs": 60000,
+  "heartbeatIntervalMs": 60000,
+  "heartbeatTimeoutMs": 1800000,
   "autoSpawnPi": true,
   "maxQueueSize": 1000
 }

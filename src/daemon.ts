@@ -580,7 +580,26 @@ function startHeartbeatChecker(): void {
   
   setInterval(() => {
     const cfg = loadConfig();
-    state.cleanupStaleConnections(cfg.heartbeatTimeoutMs);
+    const stale = state.cleanupStaleConnections(cfg.heartbeatTimeoutMs);
+
+    // 托管 session 因心跳超时被杀 → 微信还能通就告知一声
+    if (stale.killed.length > 0 && state.wechat.connected) {
+      for (const item of stale.killed) {
+        const userId = item.userId || state.wechat.userId;
+        if (!userId) continue;
+        const label = item.alias ? `@${item.alias}` : item.sessionId.slice(0, 8);
+        const mins = Math.max(1, Math.floor(item.missedMs / 60000));
+        console.log(`[心跳] 通知用户：${label} 已因心跳超时终止`);
+        wechatBridge
+          .sendText(
+            userId,
+            `⚠️ ${label} 已超过约 ${mins} 分钟无心跳，已自动终止进程\n\n` +
+              `可用 /new 或本地重新启动 pi`,
+          )
+          .catch(() => {});
+      }
+    }
+
     state.cleanupExpiredMessages();
     // 托管 session 空闲静默回收（不打扰用户，下次消息再拉起）
     state.cleanupIdleManagedSessions(cfg.sessionIdleTimeoutMs);

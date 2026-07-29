@@ -24,7 +24,12 @@ export const DAEMON_VERSION = "2";
 // 配置接口
 export interface DaemonConfig {
   httpPort: number;
+  /** 客户端心跳间隔 & daemon 巡检间隔（ms） */
   heartbeatIntervalMs: number;
+  /**
+   * 超过该时长无心跳才处理（ms）。
+   * 默认 = 30 次心跳 × 60s ≈ 30 分钟，避免偶发抖动误杀。
+   */
   heartbeatTimeoutMs: number;
   autoSpawnPi: boolean;
   maxQueueSize: number;
@@ -40,8 +45,10 @@ export interface DaemonConfig {
 // 默认配置
 const DEFAULT_CONFIG: DaemonConfig = {
   httpPort: HTTP_PORT,
-  heartbeatIntervalMs: 30_000,
-  heartbeatTimeoutMs: 60_000,
+  // 60s 一次心跳
+  heartbeatIntervalMs: 60_000,
+  // 连续约 30 次未收到心跳（≈30 分钟）才判死
+  heartbeatTimeoutMs: 30 * 60_000,
   autoSpawnPi: false,
   maxQueueSize: 1000,
   // 15 分钟无微信侧活跃 → 静默干掉，下次消息再拉起
