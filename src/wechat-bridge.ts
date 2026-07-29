@@ -6,6 +6,8 @@ import { WeixinClient, SessionExpiredError } from './wechat-client.js';
 import { loadCredentials, saveCredentials, loadConfig } from './config.js';
 import { DaemonState } from './daemon-state.js';
 import type { IncomingMessage } from './wechat-types.js';
+import { spawnPiProcess, type PiSpawnResult } from './pi-spawn.js';
+import { getSession } from './session-discover.js';
 
 // ============================================================================
 // 微信桥接
@@ -233,6 +235,7 @@ export class WechatBridge {
       console.log(`[微信] 推送消息到 pi session: ${targetSessionId}`);
       // 记录最近任务（用于 /progress）
       this.state.setLastTask(targetSessionId, messageText.slice(0, 200));
+      this.state.touchActivity(targetSessionId);
       this.state.sendToSession(targetSessionId, 'wechat_message', messageData);
     } else {
       // ===== 启动追踪 + 防重复启动 =====
@@ -256,8 +259,9 @@ export class WechatBridge {
         return;
       }
       
-      // PendingSession 在等待连接中：只入队，不重复启动
-      if (ps && (ps.status === 'pending' || ps.status === 'timeout')) {
+      // PendingSession 正在首次连接中：只入队，不重复启动
+      // timeout / inactive 允许再次拉起（锁屏失败、空闲回收后可复活）
+      if (ps && ps.status === 'pending') {
         console.log(`[微信] @${ps.alias} 正在等待连接，入队消息（不重复启动）`);
         this.state.enqueueMessage(targetSessionId, {
           id: `msg_${Date.now()}`,
@@ -328,30 +332,43 @@ export class WechatBridge {
       
       // 分阶段启动
       this.state.updateStartupStage(targetSessionId, 'starting');
-      await this.sendText(message.userId, '⏳ 正在准备启动脚本...');
+      await this.sendText(message.userId, '⏳ 正在准备启动 pi...');
       
-      const spawned = await this.spawnPiSession(targetSessionId);
+      const spawnResult = this.spawnPiSession(targetSessionId, message.userId);
       
-      if (spawned) {
+      if (spawnResult.ok) {
         this.state.updateStartupStage(targetSessionId, 'waiting_connect');
-        await this.sendText(message.userId, '⏳ 终端已打开，等待 pi 连接...');
+        await this.sendText(message.userId, this.spawnWaitHint(spawnResult, targetSessionId.slice(0, 8)));
         
-        // 等待 pi 连接（最多 15 秒）
-        const connected = await this.waitForPiConnect(targetSessionId, 15_000);
+        // 后台一般数秒内连上；GUI 锁屏场景不可靠，给 20s
+        const waitMs = spawnResult.mode === 'background' ? 20_000 : 15_000;
+        const connected = await this.waitForPiConnect(targetSessionId, waitMs);
         
         if (connected) {
           this.state.clearStartup(targetSessionId);
-          console.log(`[微信] pi 已连接: ${targetSessionId.slice(0, 8)}`);
-          // 队列消息由 daemon register handler 投递
+          this.state.touchActivity(targetSessionId);
+          console.log(`[微信] pi 已连接: ${targetSessionId.slice(0, 8)} mode=${spawnResult.mode}`);
+          if (spawnResult.mode === 'background') {
+            await this.sendText(
+              message.userId,
+              `✅ pi 已在后台连接（无 GUI）\n空闲一段时间后会自动释放，有新消息会再拉起`,
+            ).catch(() => {});
+          }
         } else {
-          this.state.updateStartupStage(targetSessionId, 'timed_out');
-          console.log(`[微信] pi 连接超时: ${targetSessionId.slice(0, 8)}`);
-          await this.sendText(message.userId, '❌ pi 启动超时（15s），请检查终端窗口。之后发送的消息会再次尝试启动');
+          // 允许下一条消息立即重试
+          this.state.clearStartup(targetSessionId);
+          console.log(`[微信] pi 连接超时: ${targetSessionId.slice(0, 8)} mode=${spawnResult.mode}`);
+          await this.sendText(
+            message.userId,
+            spawnResult.mode === 'background'
+              ? '❌ 后台启动超时，消息已缓存。请再发一条重试，或检查本机 pi 是否可用'
+              : '❌ pi 启动超时，请检查终端窗口。之后发送的消息会再次尝试启动',
+          );
         }
       } else {
         this.state.updateStartupStage(targetSessionId, 'failed');
-        console.log(`[微信] pi 启动失败: ${targetSessionId.slice(0, 8)}`);
-        await this.sendText(message.userId, '⚠️ pi 启动脚本执行失败，请手动打开终端运行 pi');
+        console.log(`[微信] pi 启动失败: ${targetSessionId.slice(0, 8)}`, spawnResult.error);
+        await this.sendText(message.userId, `⚠️ pi 启动失败：${spawnResult.error || '未知错误'}`);
       }
     }
   }
@@ -727,61 +744,76 @@ export class WechatBridge {
         // 设置默认 session
         this.state.defaultSessionId = sessionId;
         
-        // 创建启动脚本（cd 到 $HOME 避免 TCC 权限弹窗，pi 用 --session-id 关联）
-        const { writeFileSync, chmodSync } = await import('node:fs');
-        const { join } = await import('node:path');
-        const { tmpdir } = await import('node:os');
-        const scriptPath = join(tmpdir(), `pi-new-${alias}.sh`);
-        
-        const errorLog = join(tmpdir(), `pi-new-${alias}.log`);
-        const scriptContent = `#!/bin/bash\n` +
-          `cd "${homedir()}" || exit 1\n` +
-          `echo "启动 pi: ${alias}" >> "${errorLog}"\n` +
-          `pi --session-id "${sessionId}" --name "${alias}" --approve 2>>"${errorLog}" || {\n` +
-          `  echo "pi 启动失败，日志: ${errorLog}"\n` +
-          `  sleep 5\n` +
-          `}\n` +
-          `rm -- "$0" 2>/dev/null\n`;
-        writeFileSync(scriptPath, scriptContent, 'utf-8');
-        chmodSync(scriptPath, '755');
-        
-        console.log(`[微信] 启动脚本: ${scriptPath}`);
-        console.log(`[微信] 脚本内容:\n${scriptContent}`);
-        
-        // 启动终端 + pi
-        await this.sendText(userId, '⏳ 正在准备启动脚本...');
-        const child = await this.spawnTerminal(scriptPath);
-        child.unref();
-        
-        await this.sendText(userId, `⏳ 终端已打开，等待 pi 连接...`);
-        
-        // 分阶段等待（15s → 30s → 60s），每阶段给反馈
-        const stages = [
-          { ms: 15_000, msg: null },
-          { ms: 30_000, msg: `⏰ @${alias} 已等待 30s，仍在连接中...` },
-          { ms: 60_000, msg: `⏰ @${alias} 已等待 1 分钟，可能是权限弹窗或黑屏导致。` },
-        ];
-        
+        // 按锁屏状态选择 GUI 或 daemon 内联 rpc 后台启动
+        await this.sendText(userId, '⏳ 正在准备启动 pi...');
+        const spawnResult = spawnPiProcess({
+          sessionId,
+          name: alias,
+          label: alias,
+        });
+        if (spawnResult.ok) {
+          this.state.trackManagedSpawn({
+            sessionId,
+            mode: spawnResult.mode,
+            backend: spawnResult.backend,
+            childPid: spawnResult.childPid,
+            userId,
+          });
+        }
+        console.log(
+          `[微信] /new spawn mode=${spawnResult.mode} backend=${spawnResult.backend || '-'} reason=${spawnResult.reason} ok=${spawnResult.ok} pid=${spawnResult.childPid || '-'}`,
+        );
+
+        if (!spawnResult.ok) {
+          await this.sendText(userId, `⚠️ @${alias} 启动失败：${spawnResult.error || '未知错误'}`);
+          break;
+        }
+
+        await this.sendText(userId, this.spawnWaitHint(spawnResult, alias));
+
+        // 后台：短等；GUI：保留分阶段长等（权限弹窗等）
         let connected = false;
-        for (const stage of stages) {
-          connected = await this.waitForPiConnect(sessionId, stage.ms);
-          if (connected) break;
-          // 已经连上了就不发提示
+        if (spawnResult.mode === 'background') {
+          connected = await this.waitForPiConnect(sessionId, 20_000);
           if (!connected) {
+            const ps = this.state.findByAlias(alias);
+            if (ps?.status === 'connected') connected = true;
+          }
+        } else {
+          const stages = [
+            { ms: 15_000, msg: null as string | null },
+            { ms: 30_000, msg: `⏰ @${alias} 已等待 30s，仍在连接中...` },
+            { ms: 60_000, msg: `⏰ @${alias} 已等待 1 分钟，可能是权限弹窗导致。` },
+          ];
+          for (const stage of stages) {
+            connected = await this.waitForPiConnect(sessionId, stage.ms);
+            if (connected) break;
             const ps = this.state.findByAlias(alias);
             if (ps?.status === 'connected') { connected = true; break; }
             if (stage.msg) await this.sendText(userId, stage.msg).catch(() => {});
           }
         }
-        
+
         if (connected) {
-          console.log(`[微信] /new pi 已连接: ${alias}`);
+          this.state.touchActivity(sessionId);
+          console.log(`[微信] /new pi 已连接: ${alias} mode=${spawnResult.mode}`);
+          if (spawnResult.mode === 'background') {
+            await this.sendText(
+              userId,
+              `✅ @${alias} 已在后台连接（无 GUI 窗口）\n` +
+              `说明：当前线程不在终端里常驻，空闲一段时间后会自动释放；有新消息会再拉起。`,
+            ).catch(() => {});
+          }
         } else {
-          console.log(`[微信] /new 超时但保留 pending: ${alias}`);
-          await this.sendText(userId, 
-            `⏰ @${alias} 已超过 1 分钟未连接\n\n` +
-            `可能原因：终端未打开、权限弹窗、或屏幕黑屏\n` +
-            `连接后消息会自动投递。回复「关闭 @${alias}」来取消`
+          console.log(`[微信] /new 超时但保留 pending: ${alias} mode=${spawnResult.mode}`);
+          await this.sendText(userId,
+            spawnResult.mode === 'background'
+              ? `⏰ @${alias} 后台启动超时未连接\n\n` +
+                `请再发一条消息重试，或检查本机 pi 是否可用。\n` +
+                `连接后消息会自动投递。回复「关闭 @${alias}」取消`
+              : `⏰ @${alias} 已超过等待时间未连接\n\n` +
+                `可能原因：终端未打开、权限弹窗、或屏幕锁定\n` +
+                `连接后消息会自动投递。回复「关闭 @${alias}」来取消`,
           ).catch(() => {});
         }
         break;
@@ -1245,61 +1277,50 @@ export class WechatBridge {
   }
   
   // 发送欢迎消息
-  // 打开终端窗口（优先 Ghostty，回退 Terminal.app）
-  private async spawnTerminal(scriptPath: string) {
-    const { spawn, execSync } = await import('node:child_process');
-    
-    // 检测 Ghostty
-    try {
-      execSync('ls /Applications/Ghostty.app > /dev/null 2>&1');
-      console.log(`[微信] 使用 Ghostty 打开终端`);
-      return spawn('open', ['-na', 'Ghostty.app', '--args', '-e', scriptPath], { detached: true, stdio: 'ignore' });
-    } catch {}
-    
-    // 回退 Terminal.app
-    console.log(`[微信] 使用 Terminal.app 打开终端`);
-    return spawn('open', ['-a', 'Terminal.app', scriptPath], { detached: true, stdio: 'ignore' });
-  }
-  
-  // 自动启动 pi session（复用 spawnTerminal）
-  private async spawnPiSession(sessionId: string): Promise<boolean> {
-    try {
-      // 获取 session 的 cwd
-      const { getSession } = await import('./session-discover.js');
-      const session = getSession(sessionId);
-      const cwd = session?.cwd || process.env.HOME || '/tmp';
-      
-      console.log(`[微信] 自动启动 pi: session=${sessionId.slice(0, 8)}, cwd=${cwd}`);
-      
-      // 创建启动脚本（cd 到 $HOME 避免 TCC 权限弹窗）
-      const { writeFileSync, chmodSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      const { tmpdir } = await import('node:os');
-      const scriptPath = join(tmpdir(), `pi-start-${sessionId.slice(0, 8)}.sh`);
-      const errorLog = join(tmpdir(), `pi-start-${sessionId.slice(0, 8)}.log`);
-      const { homedir } = await import('node:os');
-      const scriptContent = `#!/bin/bash\n` +
-        `cd "${homedir()}" || exit 1\n` +
-        `echo "自动启动 pi: ${sessionId.slice(0,8)}" >> "${errorLog}"\n` +
-        `pi --session-id "${sessionId}" --approve 2>>"${errorLog}" || {\n` +
-        `  echo "pi 启动失败，日志: ${errorLog}"\n` +
-        `  sleep 5\n` +
-        `}\n` +
-        `rm -- "$0" 2>/dev/null\n`;
-      writeFileSync(scriptPath, scriptContent, 'utf-8');
-      chmodSync(scriptPath, '755');
-      
-      console.log(`[微信] 启动脚本: ${scriptPath}`);
-      
-      const child = await this.spawnTerminal(scriptPath);
-      child.unref();
-      
-      console.log(`[微信] pi 已启动: session=${sessionId.slice(0, 8)}`);
-      return true;
-    } catch (e) {
-      console.error('[微信] 启动 pi 失败:', e);
-      return false;
+  /** 启动过程中给用户的提示（明确是否无 GUI） */
+  private spawnWaitHint(result: PiSpawnResult, displayName: string): string {
+    if (result.mode === 'background') {
+      if (result.reason === 'screen_locked_rpc') {
+        return (
+          `🔒 检测到屏幕锁定，已在后台直接启动 @${displayName}（无 GUI 窗口）\n` +
+          `等待 pi 连接中…`
+        );
+      }
+      return `⏳ 已后台启动 @${displayName}（无 GUI），等待连接…`;
     }
+    return `⏳ 终端已打开，等待 @${displayName} 连接…`;
+  }
+
+  // 自动启动 pi session（锁屏 → 内联 rpc，否则 GUI）
+  private spawnPiSession(sessionId: string, userId?: string): PiSpawnResult {
+    const session = getSession(sessionId);
+    const cwd = session?.cwd || process.env.HOME || '/tmp';
+    const name = session?.name || this.state.connections.get(sessionId)?.name
+      || this.state.findBySessionId(sessionId)?.alias;
+
+    console.log(`[微信] 自动启动 pi: session=${sessionId.slice(0, 8)}, cwd=${cwd}`);
+
+    const result = spawnPiProcess({
+      sessionId,
+      name,
+      label: sessionId.slice(0, 8),
+    });
+
+    if (result.ok) {
+      this.state.trackManagedSpawn({
+        sessionId,
+        mode: result.mode,
+        backend: result.backend,
+        childPid: result.childPid,
+        userId,
+      });
+      console.log(
+        `[微信] pi 已启动: session=${sessionId.slice(0, 8)} mode=${result.mode} backend=${result.backend || '-'} reason=${result.reason} pid=${result.childPid || '-'}`,
+      );
+    } else {
+      console.error('[微信] 启动 pi 失败:', result.error);
+    }
+    return result;
   }
   
   // 等待 pi 连接（轮询 connections，最多 timeoutMs 毫秒）

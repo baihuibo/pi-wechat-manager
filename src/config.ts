@@ -29,6 +29,12 @@ export interface DaemonConfig {
   autoSpawnPi: boolean;
   maxQueueSize: number;
   llmApiKey?: string;  // DeepSeek API Key
+  /**
+   * 后台（daemon 内联 rpc）托管 session 空闲多久后静默回收（ms）。
+   * 仅 mode=background；GUI 会话与用户本地手动开的 pi 不杀。
+   * 有进行中的任务（taskStartTime）时不会回收。下次微信消息可再拉起。
+   */
+  sessionIdleTimeoutMs: number;
 }
 
 // 默认配置
@@ -38,6 +44,8 @@ const DEFAULT_CONFIG: DaemonConfig = {
   heartbeatTimeoutMs: 60_000,
   autoSpawnPi: false,
   maxQueueSize: 1000,
+  // 15 分钟无微信侧活跃 → 静默干掉，下次消息再拉起
+  sessionIdleTimeoutMs: 15 * 60_000,
 };
 
 // 配置文件路径

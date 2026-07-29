@@ -110,6 +110,7 @@ async function handleSocketMessage(socket: Socket, msg: any): Promise<void> {
       const queued = state.dequeueMessages(sessionId);
       if (queued.length > 0) {
         console.log(`[队列] 投递 ${queued.length} 条缓存消息给 ${sessionId.slice(0,8)}`);
+        state.touchActivity(sessionId);
         for (const msg of queued) {
           state.sendToSession(sessionId, 'wechat_message', msg);
         }
@@ -578,8 +579,11 @@ function startHeartbeatChecker(): void {
   const config = loadConfig();
   
   setInterval(() => {
-    state.cleanupStaleConnections(config.heartbeatTimeoutMs);
+    const cfg = loadConfig();
+    state.cleanupStaleConnections(cfg.heartbeatTimeoutMs);
     state.cleanupExpiredMessages();
+    // 托管 session 空闲静默回收（不打扰用户，下次消息再拉起）
+    state.cleanupIdleManagedSessions(cfg.sessionIdleTimeoutMs);
     
     // 持久化 pending sessions
     import('./config.js').then(({ savePendingSessions }) => {

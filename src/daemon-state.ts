@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { Socket } from 'node:net';
+import { killBackgroundChild, type BackgroundBackend, type SpawnMode } from './pi-spawn.js';
 
 // 连接信息
 export interface Connection {
@@ -16,6 +17,21 @@ export interface Connection {
   taskStartTime?: number;      // 任务开始时间
   progressMessages: string[];  // 进度消息历史
   lastTask?: string;           // 最近一次任务描述（用户消息）
+  /** 微信侧最近活跃（收消息/投递），用于空闲回收；不同于 heartbeat */
+  lastActivityAt?: number;
+}
+
+/** manager 拉起的 session 元数据（可空闲回收） */
+export interface ManagedSpawn {
+  sessionId: string;
+  mode: SpawnMode;
+  /** background 时的实现：daemon 内联 rpc */
+  backend?: BackgroundBackend;
+  /** rpc 子进程 pid */
+  childPid?: number;
+  spawnedAt: number;
+  lastActivityAt: number;
+  userId?: string;
 }
 
 // 微信状态
@@ -119,9 +135,13 @@ export class DaemonState {
   
   // Pending Sessions（/new 创建的线程生命周期管理）
   pendingSessions: Map<string, PendingSession> = new Map();  // key = alias
+
+  /** 由 /new 或自动启动拉起的 session（可空闲静默回收） */
+  managedSpawns: Map<string, ManagedSpawn> = new Map();
   
   // 注册连接
   register(sessionId: string, pid: number, cwd: string, socket: Socket, name?: string): void {
+    const managed = this.managedSpawns.get(sessionId);
     this.connections.set(sessionId, {
       sessionId,
       pid,
@@ -131,6 +151,7 @@ export class DaemonState {
       lastHeartbeat: new Date(),
       connectedAt: new Date(),
       progressMessages: [],
+      lastActivityAt: managed?.lastActivityAt ?? Date.now(),
     });
     
     // 加入永久注册表（之后重连不视为新 pi）
@@ -153,6 +174,89 @@ export class DaemonState {
       const remaining = Array.from(this.connections.keys());
       this.defaultSessionId = remaining[0] || null;
     }
+  }
+
+  /** 记录 manager 拉起的 session */
+  trackManagedSpawn(meta: {
+    sessionId: string;
+    mode: SpawnMode;
+    backend?: BackgroundBackend;
+    childPid?: number;
+    userId?: string;
+  }): void {
+    const now = Date.now();
+    const prev = this.managedSpawns.get(meta.sessionId);
+    this.managedSpawns.set(meta.sessionId, {
+      sessionId: meta.sessionId,
+      mode: meta.mode,
+      backend: meta.backend ?? prev?.backend,
+      childPid: meta.childPid ?? prev?.childPid,
+      spawnedAt: prev?.spawnedAt ?? now,
+      lastActivityAt: now,
+      userId: meta.userId ?? prev?.userId,
+    });
+  }
+
+  /** 微信侧活跃（投递消息等） */
+  touchActivity(sessionId: string): void {
+    const now = Date.now();
+    const conn = this.connections.get(sessionId);
+    if (conn) conn.lastActivityAt = now;
+    const managed = this.managedSpawns.get(sessionId);
+    if (managed) managed.lastActivityAt = now;
+  }
+
+  clearManagedSpawn(sessionId: string): void {
+    this.managedSpawns.delete(sessionId);
+  }
+
+  /**
+   * 静默回收空闲的托管 session。
+   * - 仅 managedSpawns
+   * - 有 taskStartTime（任务进行中）跳过
+   * - 不通知用户（下次消息可再拉起）
+   */
+  cleanupIdleManagedSessions(idleTimeoutMs: number): string[] {
+    if (!idleTimeoutMs || idleTimeoutMs <= 0) return [];
+    const now = Date.now();
+    const killed: string[] = [];
+
+    for (const [sessionId, managed] of [...this.managedSpawns.entries()]) {
+      // 仅回收后台（rpc）会话，避免关掉用户还在看的 GUI 窗口
+      if (managed.mode !== 'background') continue;
+
+      const conn = this.connections.get(sessionId);
+      // 仍在跑任务则保留
+      if (conn?.taskStartTime) continue;
+
+      const last =
+        conn?.lastActivityAt ??
+        managed.lastActivityAt ??
+        conn?.connectedAt.getTime() ??
+        managed.spawnedAt;
+
+      if (now - last < idleTimeoutMs) continue;
+
+      console.log(
+        `[状态] 托管 session ${sessionId.slice(0, 8)} 空闲 ${Math.floor((now - last) / 60000)} 分钟，静默回收（mode=${managed.mode} backend=${managed.backend}）`,
+      );
+
+      killBackgroundChild(sessionId, managed.childPid ?? conn?.pid);
+      // 再扫一次，防止 pid 漂移
+      if (conn?.pid && conn.pid !== managed.childPid) {
+        try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+      }
+
+      if (conn) {
+        try { conn.socket.destroy(); } catch {}
+        this.unregister(sessionId);
+      }
+      this.markPendingInactive(sessionId);
+      this.managedSpawns.delete(sessionId);
+      killed.push(sessionId);
+    }
+
+    return killed;
   }
   
   // 更新心跳
@@ -229,7 +333,14 @@ export class DaemonState {
   hasStartupFailed(sessionId: string): boolean {
     const attempt = this.startupTracker.get(sessionId);
     if (!attempt) return false;
-    return attempt.stage === 'timed_out' || attempt.stage === 'failed';
+    // timed_out 允许立即重试（锁屏/GUI 失败后下一句应再拉起）
+    // 仅真正的 spawn 失败短暂抑制；超过 60s 也放行
+    if (attempt.stage !== 'failed') return false;
+    if (Date.now() - attempt.startedAt > 60_000) {
+      this.startupTracker.delete(sessionId);
+      return false;
+    }
+    return true;
   }
   
   setStartup(sessionId: string, userId: string): void {
@@ -510,14 +621,20 @@ export class DaemonState {
     for (const [id, conn] of this.connections) {
       if (now - conn.lastHeartbeat.getTime() > timeoutMs) {
         stale.push(id);
-        // 杀掉卡死的 pi 进程，对应的 Ghostty 窗口也会自动关闭
-        try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+        // 杀掉卡死的 pi 进程（GUI 窗口随进程退出；rpc 后台一并清 stdin）
+        const managed = this.managedSpawns.get(id);
+        if (managed?.mode === 'background') {
+          killBackgroundChild(id, managed.childPid ?? conn.pid);
+        } else {
+          try { process.kill(conn.pid, 'SIGTERM'); } catch {}
+        }
       }
     }
     
     for (const id of stale) {
       console.log(`[状态] Session ${id} 心跳超时，已终止进程并断开连接`);
       this.unregister(id);
+      this.managedSpawns.delete(id);
     }
     
     return stale;
@@ -652,11 +769,12 @@ export class DaemonState {
   
   // 杀掉 PendingSession 相关进程
   killPendingSessionProcess(ps: PendingSession): void {
-    // 1. 杀 pi 进程
-    if (ps.piPid) {
+    const managed = this.managedSpawns.get(ps.sessionId);
+    if (managed?.mode === 'background') {
+      killBackgroundChild(ps.sessionId, managed.childPid ?? ps.piPid);
+    } else if (ps.piPid) {
       try { process.kill(ps.piPid, 'SIGTERM'); } catch {}
     } else {
-      // 没有 pid，通过 sessionId 查找
       try {
         const { execSync } = require('node:child_process');
         const output = execSync(`ps aux | grep "pi --session-id ${ps.sessionId}" | grep -v grep | awk '{print $2}'`, { encoding: 'utf-8', timeout: 3000 });
@@ -666,10 +784,11 @@ export class DaemonState {
         }
       } catch {}
     }
-    // 2. 清理可能残留的 pendingNewMessages
+    // 清理可能残留的 pendingNewMessages
     this.pendingNewMessages.delete(ps.sessionId);
     const timer = this.pendingNewTimers.get(ps.sessionId);
     if (timer) { clearTimeout(timer); this.pendingNewTimers.delete(ps.sessionId); }
+    this.managedSpawns.delete(ps.sessionId);
   }
   
   // 检查超时的 pending sessions，返回需要通知的列表
