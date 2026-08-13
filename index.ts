@@ -260,6 +260,28 @@ function fetchDaemonVersion(timeoutMs: number): Promise<string | null> {
   });
 }
 
+// 过程状态：有 ctx 走状态栏（覆盖式，不堆积），无 ctx 退回 console
+function setStatusText(ctx: Ctx | undefined, text: string): void {
+  const ui = ctx?.ui;
+  if (ui?.setStatus) {
+    ui.setStatus('wechat', text);
+  } else {
+    console.log(text);
+  }
+}
+
+// 提示/警告/错误：有 ctx 走 notify（toast，不残留），无 ctx 退回 console
+function notifyText(ctx: Ctx | undefined, text: string, level: 'info' | 'warning' | 'error' = 'info'): void {
+  const ui = ctx?.ui;
+  if (ui?.notify) {
+    ui.notify(text, level);
+  } else if (level === 'error') {
+    console.error(text);
+  } else {
+    console.log(text);
+  }
+}
+
 // 全面健康检查
 async function checkDaemonHealth(): Promise<DaemonHealth> {
   const pid = readDaemonPid();
@@ -300,31 +322,26 @@ async function checkDaemonHealth(): Promise<DaemonHealth> {
 }
 
 // 强制杀掉守护进程（SIGTERM → 等待 → SIGKILL → 清理残留）
-async function killDaemon(): Promise<void> {
+async function killDaemon(ctx?: Ctx): Promise<void> {
   const pid = readDaemonPid();
 
   // 1. 通过 PID 杀
   if (pid !== null && isPidAlive(pid)) {
-    console.log(`[微信] 发送 SIGTERM → PID ${pid}`);
     try { process.kill(pid, 'SIGTERM'); } catch {}
 
     // 等 1.5s，检查退出
     for (let i = 0; i < 3; i++) {
       await new Promise(r => setTimeout(r, 500));
-      if (!isPidAlive(pid)) {
-        console.log(`[微信] PID ${pid} 已退出 (SIGTERM)`);
-        break;
-      }
+      if (!isPidAlive(pid)) break;
     }
 
     // SIGKILL 兜底
     if (isPidAlive(pid)) {
-      console.log(`[微信] SIGTERM 无效，发送 SIGKILL → PID ${pid}`);
       try { process.kill(pid, 'SIGKILL'); } catch {}
       await new Promise(r => setTimeout(r, 1000));
 
       if (isPidAlive(pid)) {
-        console.log(`[微信] ⚠️ PID ${pid} 无法杀死，需手动处理`);
+        notifyText(ctx, `⚠️ PID ${pid} 无法杀死，需手动处理`, 'error');
       }
     }
   }
@@ -338,44 +355,39 @@ async function killDaemon(): Promise<void> {
   // 4. 等待端口释放
   for (let i = 0; i < 10; i++) {
     const used = await checkPortOccupied();
-    if (!used) {
-      console.log(`[微信] 端口 ${HTTP_PORT} 已释放`);
-      return;
-    }
+    if (!used) return;
     await new Promise(r => setTimeout(r, 300));
   }
 
-  console.log(`[微信] ⚠️ 端口 ${HTTP_PORT} 仍被占用，跳过等待`);
+  notifyText(ctx, `⚠️ 端口 ${HTTP_PORT} 仍被占用，跳过等待`, 'warning');
 }
 
-async function startDaemon(): Promise<boolean> {
-  console.log(`[微信] 健康检查...`);
+async function startDaemon(ctx?: Ctx): Promise<boolean> {
   const health = await checkDaemonHealth();
 
   switch (health.status) {
     case 'healthy':
-      console.log(`[微信] 守护进程健康 (v${health.version})，跳过重启`);
       return true;
 
     case 'version_mismatch':
-      console.log(`[微信] 版本不匹配 (运行 v${health.runningVersion} → 当前 v${DAEMON_VERSION})，重启中...`);
-      await killDaemon();
+      await killDaemon(ctx);
       break;
 
     case 'unresponsive':
-      console.log(`[微信] 守护进程无响应: ${health.reason}`);
-      await killDaemon();
+      notifyText(ctx, '守护进程无响应，正在重启', 'warning');
+      await killDaemon(ctx);
       break;
 
     case 'zombie':
-      console.log(`[微信] 僵尸进程: ${health.reason}`);
-      await killDaemon();
+      notifyText(ctx, '检测到残留进程，正在清理重启', 'warning');
+      await killDaemon(ctx);
       break;
 
     case 'not_running':
-      console.log(`[微信] 守护进程未运行，启动中...`);
       break;
   }
+
+  setStatusText(ctx, '⏳ 启动守护进程...');
 
   // 起新进程
   const { spawn } = await import('node:child_process');
@@ -400,7 +412,6 @@ async function startDaemon(): Promise<boolean> {
   });
 
   child.unref();
-  console.log(`[微信] 子进程已启动 (PID: ${child.pid})`);
 
   // 等待 socket + HTTP 就绪（最多 10s）
   for (let i = 0; i < 20; i++) {
@@ -408,12 +419,11 @@ async function startDaemon(): Promise<boolean> {
     if (existsSync(SOCKET_PATH)) {
       // socket 出现后再等 500ms 确保 HTTP server 启动
       await new Promise(r => setTimeout(r, 500));
-      console.log(`[微信] 守护进程启动成功`);
       return true;
     }
   }
 
-  console.log(`[微信] 守护进程启动超时 (10s)`);
+  notifyText(ctx, '守护进程启动超时 (10s)', 'error');
   return false;
 }
 
@@ -474,7 +484,6 @@ async function tryLoadSessionName(ctx?: Ctx): Promise<void> {
     const info = getSession(sessionId);
     if (info?.name) {
       sessionName = info.name;
-      console.log(`[微信] 从 session 文件加载名称: ${sessionName}`);
       if (socketClient?.connected) {
         socketClient.request('set_alias', { name: sessionName, sessionId }).catch(() => {});
       }
@@ -490,7 +499,6 @@ async function tryLoadSessionName(ctx?: Ctx): Promise<void> {
       for (const [alias, sid] of Object.entries(aliases)) {
         if (sid === sessionId) {
           sessionName = alias;
-          console.log(`[微信] 从别名表加载名称: ${sessionName}`);
           if (ctx) updateStatusBar(ctx as ExtensionContext);
           break;
         }
@@ -876,7 +884,6 @@ export default function wechatManager(pi: ExtensionAPI) {
       const idx = argv.indexOf('--name');
       if (idx !== -1 && idx + 1 < argv.length) {
         sessionName = argv[idx + 1];
-        console.log(`[微信] 从进程参数读取名称: ${sessionName}`);
         updateStatusBar(ctx);
       }
     }
@@ -909,7 +916,7 @@ export default function wechatManager(pi: ExtensionAPI) {
           
           if (!daemonRunning) {
             ctx.ui.setStatus('wechat', '⏳ 启动守护进程...');
-            const started = await startDaemon();
+            const started = await startDaemon(ctx);
             if (!started) {
               ctx.ui.setStatus('wechat', '');
               ctx.ui.notify('启动守护进程失败', 'error');
