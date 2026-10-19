@@ -3,7 +3,7 @@
 // ============================================================================
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { Type } from '@sinclair/typebox';
+import { Type } from 'typebox';
 import { createConnection, Socket } from 'node:net';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
